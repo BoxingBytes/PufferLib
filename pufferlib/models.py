@@ -274,3 +274,30 @@ class ConvSequence(nn.Module):
     def get_output_shape(self):
         _c, h, w = self._input_shape
         return (self._out_channels, (h + 1) // 2, (w + 1) // 2)
+
+class IEM(nn.Module):
+    def __init__(self, env, hidden_size=32):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.encoder = nn.Linear(np.prod(env.single_observation_space.shape)*2, hidden_size)
+        self.decoder = nn.Linear(hidden_size, 1)
+
+    def forward(self, observations):
+        hidden, lookup = self.encode_observations(observations)
+        output = self.decode_actions(hidden, lookup)
+        return output
+
+    def encode_observations(self, observations):
+        '''Encodes a batch of observations into hidden states. Assumes
+        no time dimension (handled by LSTM wrappers).
+        
+        observations: (batch_size, obs_shape)
+        '''
+        batch_size = observations.shape[0]
+        observations = observations.view(batch_size, -1)
+        return torch.tanh(self.encoder(observations.float())), None
+
+    def decode_actions(self, hidden, lookup):
+        output = self.decoder(hidden)
+        output = torch.tanh(output) + 1
+        return output

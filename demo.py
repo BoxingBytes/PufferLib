@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 import pufferlib
+import pufferlib.models
 import pufferlib.sweep
 import pufferlib.utils
 import pufferlib.vector
@@ -141,6 +142,8 @@ def train(args, make_env, policy_cls, rnn_cls, target_metric, min_eval_points=10
         if hasattr(orig_policy, 'lstm'):
             policy.lstm = orig_policy.lstm
 
+    if args["train"]["iem"]: 
+        iem_policy = pufferlib.models.IEM(vecenv.driver_env)
     '''
     if env_name == 'moba':
         import torch
@@ -159,7 +162,7 @@ def train(args, make_env, policy_cls, rnn_cls, target_metric, min_eval_points=10
 
     train_config = pufferlib.namespace(**args['train'], env=env_name,
         exp_id=args['exp_id'] or env_name + '-' + str(uuid.uuid4())[:8])
-    data = clean_pufferl.create(train_config, vecenv, policy, wandb=wandb, neptune=neptune)
+    data = clean_pufferl.create(train_config, vecenv, policy, wandb=wandb, neptune=neptune, iem_policy=iem_policy)
 
     timesteps = []
     scores = []

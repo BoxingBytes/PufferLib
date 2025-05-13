@@ -22,6 +22,7 @@ class Recurrent(pufferlib.models.LSTMWrapper):
 class CleanRLPolicy(torch.nn.Module):
     def __init__(self, env, hidden_size=64):
         super().__init__()
+        self.hidden_size = hidden_size
         self.is_continuous = isinstance(env.single_action_space, pufferlib.spaces.Box)
 
         self.actor_encoder = nn.Sequential(
@@ -34,7 +35,8 @@ class CleanRLPolicy(torch.nn.Module):
         self.actor_decoder_mean = layer_init(
             nn.Linear(hidden_size, env.single_action_space.shape[0]), std=0.01
         )
-        self.actor_decoder_logstd = nn.Parameter(torch.zeros(1, env.single_action_space.shape[0]))
+        # self.actor_decoder_logstd = nn.Parameter(0.6 * torch.ones(size=(1, env.single_action_space.shape[0])))
+        self.actor_decoder_logstd = torch.tensor(0.2)
 
         self.critic = nn.Sequential(
             layer_init(nn.Linear(np.array(env.single_observation_space.shape).prod(), hidden_size)),

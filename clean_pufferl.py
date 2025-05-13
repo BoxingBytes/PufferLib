@@ -15,6 +15,7 @@ from rich.table import Table
 
 import torch
 import torch.distributed as dist
+from torch.functional import F
 
 import pufferlib
 import pufferlib.utils
@@ -28,7 +29,7 @@ torch.set_float32_matmul_precision('high')
 from c_gae import compute_gae
 
 
-def create(config, vecenv, policy, optimizer=None, wandb=None, neptune=None):
+def create(config, vecenv, policy, optimizer=None, wandb=None, neptune=None, iem_policy=None):
     seed_everything(config.seed, config.torch_deterministic)
     profile = Profile()
     losses = make_losses()
@@ -56,6 +57,12 @@ def create(config, vecenv, policy, optimizer=None, wandb=None, neptune=None):
 
     optimizer = torch.optim.Adam(policy.parameters(),
         lr=config.learning_rate, eps=1e-5)
+    
+    iem_opt, iem_loss = None, None
+    if iem_policy is not None:
+        iem_opt = torch.optim.Adam(iem_policy.parameters(),
+            lr=config.learning_rate, eps=1e-3)
+        iem_loss = torch.nn.MSELoss()
 
     return pufferlib.namespace(
         config=config,
@@ -78,6 +85,9 @@ def create(config, vecenv, policy, optimizer=None, wandb=None, neptune=None):
         utilization=utilization,
         intrinsic_mean=None,
         intrinsic_std=None,
+        iem_policy=iem_policy,
+        iem_opt=iem_opt, 
+        iem_loss=iem_loss,
     )
 
 @pufferlib.utils.profile
@@ -188,6 +198,7 @@ def evaluate(data):
 
 @pufferlib.utils.profile
 def train(data):
+
     config, profile, experience = data.config, data.profile, data.experience
     data.losses = make_losses()
     losses = data.losses
@@ -197,10 +208,73 @@ def train(data):
         dones_np = experience.dones_np[idxs]
         values_np = experience.values_np[idxs]
         rewards_np = experience.rewards_np[idxs]
+
+        o_obs = experience.obs[idxs] # (batch_size, obs_shape)
+        o_nobs = torch.cat((
+            o_obs[1:], torch.zeros(
+                (1,*data.vecenv.single_observation_space.shape), dtype=torch.float16)),
+            dim=0
+        ) # (batch_size, obs_shape)
+        num_envs = data.vecenv.num_agents # Each agents gets its own env_id
+        T = experience.batch_size // num_envs # Consecutive timesteps per agent
+        eot_mask = np.zeros(experience.batch_size) # We don't train on last batch step for each agent
+        eot_mask[-1::-T] = 1
+        eot_mask = torch.as_tensor(eot_mask, dtype=torch.float32).to(config.device)
+        # b_eot_mask = eot_mask.reshape(
+        #     experience.num_minibatches, -1
+        # )
+
+        # IEM rewards
+        iem_input = torch.cat((o_obs, o_nobs), dim=1) # (batch_size, obs_shape*2)
+        ri = data.iem_policy(
+            iem_input 
+        ).reshape(experience.batch_size).detach().numpy()
+        ri[dones_np == 1] = 0
+        ri[eot_mask == 1] = 0
+        rewards_np = rewards_np + 0.1*ri 
+
+        # Training IEM data 
+        # Generate n randomly with constraints of n<next_eot-i 
+        # So we don't try to predict futures states from different envs
+        max_n = 5
+        eot_indices = torch.where(eot_mask==1)[0]
+        assert eot_indices[-1] == experience.batch_size - 1, \
+            'Last index of eot_mask should be the last index of the batch'
+        
+        # Vectorized upper bounds computation
+        ids = torch.arange(experience.batch_size)
+        next_eot_idx = torch.searchsorted(eot_indices, ids)
+        next_eot_pos = eot_indices[next_eot_idx]
+        upper_bounds = next_eot_pos - ids
+
+        # Sample n and clip to upper bounds
+        n = torch.randint(1, max_n + 1, size=upper_bounds.shape)
+        n = torch.minimum(n, upper_bounds)
+        n[eot_mask == 1] = 0  # Optional: zero-out n where context ends
+
+        # Index observations with n-step offsets
+        o_obs_n_idxs = ids + n
+        o_obs_n = o_obs[o_obs_n_idxs]
+        paired_obs = torch.cat((o_obs, o_obs_n), dim=1) # (batch_size, obs_shape*2)
+        paired_obs = paired_obs.reshape(
+            experience.num_minibatches, -1, paired_obs.shape[1]
+        )
+        n = n.reshape(
+            experience.num_minibatches, -1
+        )
         # TODO: bootstrap between segment bounds
         advantages_np = compute_gae(dones_np, values_np,
             rewards_np, config.gamma, config.gae_lambda)
         experience.flatten_batch(advantages_np)
+
+    # Batching for masking in IEM training
+    dones_np = torch.as_tensor(dones_np).reshape(
+        experience.num_minibatches, -1
+    )
+    eot_mask = eot_mask.reshape(
+        experience.num_minibatches, -1
+    )
+    combined_mask = (dones_np == 0) & (eot_mask == 0)
 
     # Optimizing the policy and value network
     total_minibatches = experience.num_minibatches * config.update_epochs
@@ -209,6 +283,8 @@ def train(data):
     for epoch in range(config.update_epochs):
         lstm_state = None
         for mb in range(experience.num_minibatches):
+
+            # experience.b_obs is (num_minibatches, minibatch_size//bptt, bptt, obs_shape)
             with profile.train_misc:
                 obs = experience.b_obs[mb]
                 obs = obs.to(config.device)
@@ -217,6 +293,11 @@ def train(data):
                 val = experience.b_values[mb]
                 adv = experience.b_advantages[mb]
                 ret = experience.b_returns[mb]
+                combined_mask_b = combined_mask[mb]
+                steps_b = n[mb]
+                pobs_b = paired_obs[mb]
+                steps_b = steps_b[combined_mask_b]
+                pobs_b = pobs_b[combined_mask_b]
 
             with profile.train_forward:
                 if experience.lstm_h is not None:
@@ -226,11 +307,12 @@ def train(data):
                         obs, state=lstm_state, action=atn)
                     lstm_state = (lstm_state[0].detach(), lstm_state[1].detach())
                 else:
-                    _, newlogprob, entropy, newvalue, _, _ = data.policy(
+                    _, newlogprob, entropy, newvalue = data.policy(
                         obs.reshape(-1, *data.vecenv.single_observation_space.shape),
                         action=atn,
                     )
 
+                pred_n = data.iem_policy(pobs_b).squeeze(-1)
                 if config.device == 'cuda':
                     torch.cuda.synchronize()
 
@@ -248,12 +330,12 @@ def train(data):
                 if config.norm_adv:
                     adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
-                # Policy loss
                 pg_loss1 = -adv * ratio
                 pg_loss2 = -adv * torch.clamp(
                     ratio, 1 - config.clip_coef, 1 + config.clip_coef
                 )
-                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+                pg_loss = torch.max(pg_loss1, pg_loss2)
+                pg_loss = pg_loss.mean()
 
                 # Value loss
                 newvalue = newvalue.view(-1)
@@ -278,6 +360,13 @@ def train(data):
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(data.policy.parameters(), config.max_grad_norm)
                 data.optimizer.step()
+
+                iem_loss = F.mse_loss(pred_n, steps_b.float())
+                data.iem_opt.zero_grad()
+                iem_loss.backward()
+                torch.nn.utils.clip_grad_norm_(data.iem_policy.parameters(), config.max_grad_norm)
+                data.iem_opt.step()
+
                 if config.device == 'cuda':
                     torch.cuda.synchronize()
 
@@ -527,6 +616,7 @@ class Experience:
         return self.ptr >= self.batch_size
 
     def store(self, obs, value, action, logprob, reward, done, env_id, mask):
+        # Input Shapes: (train.env_batch_size*env.num_envs*env.num_agents, obs_shape)  
         # Mask learner and Ensure indices do not exceed batch size
         ptr = self.ptr
         indices = torch.where(mask)[0].numpy()[:self.batch_size - ptr]
@@ -696,7 +786,7 @@ def rollout(env_creator, env_kwargs, policy_cls, rnn_cls, agent_creator, agent_k
                 #action, _, value, _, state, e3b, intrinsic = agent(ob, state, e3b=e3b_inv)
                 action, _, value, _, state = agent(ob, state, e3b=e3b_inv)
             else:
-                action, _, value, _, e3b, intrinsic = agent(ob, e3b=e3b_inv)
+                action, _, value, _ = agent(ob)
 
             action = action.cpu().numpy().reshape(env.action_space.shape)
 
