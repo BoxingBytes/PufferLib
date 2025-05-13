@@ -22,8 +22,3 @@ class Policy(pufferlib.models.Convolutional):
             flat_size=flat_size,
             channels_last=True,
         )
-        self.hidden_size = hidden_size
-
-class PolicyLN(pufferlib.models.Default):
-    def __init__(self, env, hidden_size=128):
-        super().__init__(env, hidden_size)
