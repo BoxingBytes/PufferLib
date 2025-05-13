@@ -226,7 +226,7 @@ def train(data):
                         obs, state=lstm_state, action=atn)
                     lstm_state = (lstm_state[0].detach(), lstm_state[1].detach())
                 else:
-                    _, newlogprob, entropy, newvalue, _, _ = data.policy(
+                    _, newlogprob, entropy, newvalue = data.policy(
                         obs.reshape(-1, *data.vecenv.single_observation_space.shape),
                         action=atn,
                     )
