@@ -15,8 +15,10 @@ from rich.table import Table
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 
 import pufferlib
+import pufferlib.models
 import pufferlib.utils
 import pufferlib.pytorch
 
@@ -54,8 +56,15 @@ def create(config, vecenv, policy, optimizer=None, wandb=None, neptune=None):
     if config.compile:
         policy = torch.compile(policy, mode=config.compile_mode)
 
-    optimizer = torch.optim.Adam(policy.parameters(),
-        lr=config.learning_rate, eps=1e-5)
+    if config.icm: 
+        icm_forward = pufferlib.models.ICM_forward(vecenv.driver_env)
+        icm_inverse = pufferlib.models.ICM_inverse(vecenv.driver_env)
+        optimizer = torch.optim.Adam(
+            list(policy.parameters()) + list(icm_forward.parameters()) + list(icm_inverse.parameters()),
+            lr=config.learning_rate, eps=1e-3)
+    else: 
+        optimizer = torch.optim.Adam(policy.parameters(),
+            lr=config.learning_rate, eps=1e-5)
 
     return pufferlib.namespace(
         config=config,
@@ -78,6 +87,8 @@ def create(config, vecenv, policy, optimizer=None, wandb=None, neptune=None):
         utilization=utilization,
         intrinsic_mean=None,
         intrinsic_std=None,
+        icm_forward=icm_forward,
+        icm_inverse=icm_inverse,
     )
 
 @pufferlib.utils.profile
@@ -197,6 +208,45 @@ def train(data):
         dones_np = experience.dones_np[idxs]
         values_np = experience.values_np[idxs]
         rewards_np = experience.rewards_np[idxs]
+
+        # Get obs and obs+1 
+        obs = experience.obs[idxs]
+        next_obs = torch.concat((
+            obs[1:],
+            torch.zeros((1, *obs.shape[1:]), dtype=obs.dtype)
+        ))
+        num_envs = data.vecenv.num_envs
+        T = experience.batch_size // num_envs
+        seg_bounds = np.zeros(shape=(len(idxs)))
+        seg_bounds[-1::-T] = 1
+        valid_mask = (dones_np == 0) & (seg_bounds == 0)
+
+        latent_obs, _ = data.icm_inverse.encode_observations(obs)
+        latent_next_obs, _ = data.icm_inverse.encode_observations(next_obs)
+
+        atn = torch.as_tensor(experience.actions_np[idxs])
+        atn_onehot = F.one_hot(atn, num_classes=data.vecenv.single_action_space.n).float()
+        icm_input = torch.cat((latent_obs, atn_onehot), dim=1)
+        atn_onehot = atn_onehot.reshape(experience.num_minibatches, -1, *atn_onehot.shape[1:])
+        icm_value, _ = data.icm_forward(icm_input)
+        ri = torch.linalg.norm(latent_next_obs - icm_value, dim=1)
+        ri = ri.detach().numpy()
+        ri = (ri - ri.mean()) / (ri.std() + 1e-8)
+        ri = ri * (valid_mask)
+        beta = .1
+        rewards_np += beta * ri
+
+
+        # Prep ICM for training
+        valid_mask = torch.as_tensor(valid_mask).reshape(experience.num_minibatches,-1)
+        # latent_obs = latent_obs.reshape(experience.num_minibatches, -1, *latent_obs.shape[1:])
+        # latent_next_obs = latent_next_obs.reshape(experience.num_minibatches, -1, *latent_next_obs.shape[1:])
+        # icm_forward_b = icm_value.reshape(experience.num_minibatches, -1, *icm_value.shape[1:])
+        # inverse_input_b = torch.cat((obs, next_obs), dim=1)
+        # inv_output_b, _ = data.icm_inverse(inverse_input_b)
+        # inv_output_b = inv_output_b.reshape(experience.num_minibatches, -1, *inv_output_b.shape[1:])
+        next_obs = next_obs.reshape(experience.num_minibatches, -1, *next_obs.shape[1:])
+
         # TODO: bootstrap between segment bounds
         advantages_np = compute_gae(dones_np, values_np,
             rewards_np, config.gamma, config.gae_lambda)
@@ -217,6 +267,17 @@ def train(data):
                 val = experience.b_values[mb]
                 adv = experience.b_advantages[mb]
                 ret = experience.b_returns[mb]
+
+                mask = valid_mask[mb]
+                next_obs_mb = next_obs[mb]
+                obs_mb = obs.reshape(-1, obs.shape[-1])
+                inv_input_mb = torch.cat((obs_mb, next_obs_mb), dim=1)
+                inv_output_mb, _ = data.icm_inverse(inv_input_mb)
+                phi_st, _ = data.icm_inverse.encode_observations(obs_mb)
+                phi_st1, _ = data.icm_inverse.encode_observations(next_obs_mb)
+                atn_onehot_mb = atn_onehot[mb].detach()
+                icm_input = torch.cat((phi_st, atn_onehot_mb), dim=1)
+                icm_value, _ = data.icm_forward(icm_input)
 
             with profile.train_forward:
                 if experience.lstm_h is not None:
@@ -273,6 +334,12 @@ def train(data):
                 entropy_loss = entropy.mean()
                 loss = pg_loss - config.ent_coef * entropy_loss + v_loss * config.vf_coef
 
+                atn_in = atn.reshape(-1)
+                icm_inv_loss = F.cross_entropy(inv_output_mb[mask], atn_in[mask])
+
+                icm_forward_loss = F.mse_loss(icm_value[mask], phi_st1[mask])
+                loss += 0.1 * icm_forward_loss + (1 - 0.1) * icm_inv_loss
+                                 
             with profile.learn:
                 data.optimizer.zero_grad()
                 loss.backward()
@@ -282,6 +349,8 @@ def train(data):
                     torch.cuda.synchronize()
 
             with profile.train_misc:
+                losses.icm_forward += icm_forward_loss.item() / total_minibatches
+                losses.icm_inverse += icm_inv_loss.item() / total_minibatches
                 losses.policy_loss += pg_loss.item() / total_minibatches
                 losses.value_loss += v_loss.item() / total_minibatches
                 losses.entropy += entropy_loss.item() / total_minibatches
@@ -465,6 +534,8 @@ def make_losses():
         approx_kl=0,
         clipfrac=0,
         explained_variance=0,
+        icm_forward=0,
+        icm_inverse=0,
     )
 
 class Experience:
@@ -696,7 +767,7 @@ def rollout(env_creator, env_kwargs, policy_cls, rnn_cls, agent_creator, agent_k
                 #action, _, value, _, state, e3b, intrinsic = agent(ob, state, e3b=e3b_inv)
                 action, _, value, _, state = agent(ob, state, e3b=e3b_inv)
             else:
-                action, _, value, _, e3b, intrinsic = agent(ob, e3b=e3b_inv)
+                action, _, value, _, = agent(ob)
 
             action = action.cpu().numpy().reshape(env.action_space.shape)
 

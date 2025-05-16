@@ -274,3 +274,115 @@ class ConvSequence(nn.Module):
     def get_output_shape(self):
         _c, h, w = self._input_shape
         return (self._out_channels, (h + 1) // 2, (w + 1) // 2)
+
+class ICM_forward(Default):
+    """Forward ICM module. Takes \phi(s_t) and a_t to predict \phi(s_{t+1}).
+    """
+    def __init__(self, env, hidden_size=128):
+        super().__init__(env)
+        self.hidden_size = hidden_size
+        self.is_multidiscrete = isinstance(env.single_action_space,
+                pufferlib.spaces.MultiDiscrete)
+        self.is_continuous = isinstance(env.single_action_space,
+                pufferlib.spaces.Box)
+                
+        if self.is_multidiscrete:
+            action_space = int(np.sum(env.single_action_space.nvec))
+        elif self.is_continuous:
+            action_space = np.prod(env.single_action_space.shape)
+        else:
+            action_space = env.single_action_space.n
+
+        try:
+            self.is_dict_obs = isinstance(env.env.observation_space, pufferlib.spaces.Dict) 
+        except:
+            self.is_dict_obs = isinstance(env.observation_space, pufferlib.spaces.Dict) 
+
+        if self.is_dict_obs:
+            self.dtype = pufferlib.pytorch.nativize_dtype(env.emulated)
+            self.input_size = self.hidden_size+action_space
+            self.encoder = nn.Linear(self.input_size, self.hidden_size)
+        else:
+            self.input_size = self.hidden_size+action_space
+            self.encoder = nn.Linear(self.input_size, hidden_size)
+
+        self.output_dim = self.hidden_size
+        if self.is_multidiscrete:
+            action_nvec = env.single_action_space.nvec
+            self.decoder = nn.ModuleList([pufferlib.pytorch.layer_init(
+                nn.Linear(hidden_size, n), std=0.01) for n in action_nvec])
+        elif not self.is_continuous:
+            self.decoder = pufferlib.pytorch.layer_init(
+                nn.Linear(hidden_size, self.output_dim), std=0.01)
+        else:
+            self.decoder_mean = pufferlib.pytorch.layer_init(
+                nn.Linear(hidden_size, env.single_action_space.shape[0]), std=0.01)
+            self.decoder_logstd = nn.Parameter(torch.zeros(
+                1, env.single_action_space.shape[0]))
+
+        self.value_head = nn.Linear(hidden_size, 1)
+
+class ICM_inverse(Default):
+    """Inverse ICM module. Takes s_t and s_{t+1} to predict a_t.
+
+    Encoder takes s_t or s_t+1 
+    Decoder takes \phi(s_t) AND \phi(s_{t+1}) concat together
+    """
+    def __init__(self, env, hidden_size=128):
+        super().__init__(env)
+        self.hidden_size = hidden_size
+        self.is_multidiscrete = isinstance(env.single_action_space,
+                pufferlib.spaces.MultiDiscrete)
+        self.is_continuous = isinstance(env.single_action_space,
+                pufferlib.spaces.Box)
+        try:
+            self.is_dict_obs = isinstance(env.env.observation_space, pufferlib.spaces.Dict) 
+        except:
+            self.is_dict_obs = isinstance(env.observation_space, pufferlib.spaces.Dict) 
+
+        if self.is_dict_obs:
+            self.dtype = pufferlib.pytorch.nativize_dtype(env.emulated)
+            self.input_size = int(sum(np.prod(v.shape) for v in env.env.observation_space.values()))
+            self.encoder = nn.Linear(self.input_size, self.hidden_size)
+        else:
+            self.input_size = np.prod(env.single_observation_space.shape)
+            self.encoder = nn.Linear(self.input_size, hidden_size)
+
+        if self.is_multidiscrete:
+            action_nvec = env.single_action_space.nvec
+            self.decoder = nn.ModuleList([pufferlib.pytorch.layer_init(
+                nn.Linear(hidden_size*2, n), std=0.01) for n in action_nvec])
+        elif not self.is_continuous:
+            self.decoder = pufferlib.pytorch.layer_init(
+                nn.Linear(hidden_size*2, env.single_action_space.n), std=0.01)
+        else:
+            self.decoder_mean = pufferlib.pytorch.layer_init(
+                nn.Linear(hidden_size*2, env.single_action_space.shape[0]), std=0.01)
+            self.decoder_logstd = nn.Parameter(torch.zeros(
+                1, env.single_action_space.shape[0]))
+
+        self.value_head = nn.Linear(hidden_size*2, 1)
+
+
+    def forward(self, observations):
+        """Will be called at training with 
+        observations = [s_t, s_{t+1}]
+
+        So we need to split both
+        
+        """
+        assert observations.shape[-1] == 2*self.input_size, \
+            f"Expected observations to be of shape {self.input_size*2}, but got {observations.shape[-1]}"
+        
+        assert len(observations.shape) == 2, \
+            f"Expected observations to be of shape (batch_size, {self.input_size*2}), but got {observations.shape}"
+        
+        hidden1, lookup1 = self.encode_observations(observations[:,:self.input_size])
+        hidden2, lookup2 = self.encode_observations(observations[:,self.input_size:])
+        hidden = torch.cat((hidden1, hidden2), dim=1)
+        if lookup1 and lookup2:
+            lookup = torch.cat((lookup1, lookup2), dim=1)
+        else:
+            lookup = None
+        actions, value = self.decode_actions(hidden, lookup)
+        return actions, value
