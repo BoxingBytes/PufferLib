@@ -1,5 +1,6 @@
 #include <raylib.h>
 #include <unistd.h>
+#include <stdlib.h>
 #include "puffernet.h"
 #include "shared_pool.h"
 
