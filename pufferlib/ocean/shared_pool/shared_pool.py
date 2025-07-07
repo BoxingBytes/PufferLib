@@ -68,6 +68,8 @@ class PyCPR(pufferlib.PufferEnv):
 
         info = []
         if self.tick % self.report_interval == 0:
+            # Gather and aggregate logs from all c_envs
+            # Then flush the Logs
             log = binding.vec_log(self.c_envs)
             if log:
                 info.append(log)

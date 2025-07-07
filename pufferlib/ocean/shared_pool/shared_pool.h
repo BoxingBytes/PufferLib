@@ -121,6 +121,7 @@ void add_log(CCpr *env, Log *log) {
   env->log.score += log->score;
   env->log.moves += log->moves / log->alive_steps;
   env->log.alive_steps += log->alive_steps;
+  env->log.food_nb += log->food_nb;
   env->log.n += 1;
 }
 
@@ -315,10 +316,8 @@ void add_hp(CCpr *env, int agent_id, float hp) {
     agent->hp = MAX_HP;
   } else if (agent->hp <= 0) {
     agent->hp = 0;
-    env->agent_logs[agent->id].score += LOG_SCORE_REWARD_DEATH;
     reward_agent(env, agent_id, REWARD_DEATH);
     env->terminals[agent->id] = 1;
-    add_log(env, &env->agent_logs[agent_id]);
   }
 }
 
@@ -398,8 +397,8 @@ void spawn_agent(CCpr *env, int i){
 }
 void c_reset(CCpr *env) {
   env->tick = 0;
-  memset(env->agent_logs, 0, env->num_agents * sizeof(Log));
-  env->log = (Log){0};
+  // memset(env->agent_logs, 0, env->num_agents * sizeof(Log));
+  // env->log = (Log){0};
   env->foods->size = 0;
   memset(env->foods->indexes, 0, env->width * env->height * sizeof(int));
   // make_grid_from_scratch(env);
@@ -430,7 +429,6 @@ void reward_agents_near(CCpr *env, int food_index) {
     if ((ac == food_c && (ar == food_r - 1 || ar == food_r + 1)) ||
         (ar == food_r && (ac == food_c - 1 || ac == food_c + 1))) {
       reward_agent(env, i, env->interactive_food_reward);
-      env->agent_logs[i].score += LOG_SCORE_REWARD_MEDIUM;
       add_hp(env, i, HP_REWARD_FOOD_MEDIUM);
     }
   }
@@ -481,7 +479,6 @@ void step_agent(CCpr *env, int i) {
   // In this case the agent position does not change
   // We still have some checks to perform
   if (tile >= INTERACTIVE_FOOD) {
-    env->agent_logs[i].score += LOG_SCORE_REWARD_MOVE;
     reward_agent(env, i, env->reward_move);
     next_r = agent->r;
     next_c = agent->c;
@@ -491,12 +488,10 @@ void step_agent(CCpr *env, int i) {
   switch (tile) {
   case NORMAL_FOOD:
     reward_agent(env, i, env->reward_food);
-    env->agent_logs[i].score += LOG_SCORE_REWARD_SMALL;
     add_hp(env, i, HP_REWARD_FOOD_SMALL);
     remove_food(env, next_grid_idx);
     break;
   case EMPTY:
-    env->agent_logs[i].score += LOG_SCORE_REWARD_MOVE;
     reward_agent(env, i, env->reward_move);
     break;
   }
@@ -571,30 +566,26 @@ void c_step(CCpr *env) {
       alive_agents += 1;
       if (env->agents[i].hp < 20) {
         reward_agent(env, i, REWARD_20_HP);
-        env->agent_logs[i].score += REWARD_20_HP;
       } else if (env->agents[i].hp > 80) {
         reward_agent(env, i, REWARD_80_HP);
-        env->agent_logs[i].score += REWARD_80_HP;
       }
     } 
-    // else {
-      // int grid_idx = grid_index(env, env->agents[i].r, env->agents[i].c);
-      // env->grid[grid_idx] = EMPTY;
-      // spawn_agent(env, i);
-    // }
   }
-  /*
-  if (alive_agents == 0) {
-    env->agent_logs[i].moves = 0;
-  }else{
-    env->agent_logs[i].moves /= alive_agents;
-  }
-  env->agent_logs[i].food_nb = env->foods->size;
-  env->agent_logs[i].alive_steps = env->tick;
-  */
-  env->log.food_nb = env->foods->size;
   compute_observations(env);
   if (alive_agents == 0 || env->tick > 1000) {
+
+    // Remaining agents gets a reward of 1
+    for (int i = 0; i < env->num_agents; i++) {
+      if (env->agents[i].hp > 0) {
+        reward_agent(env, i, 1);
+        env->agent_logs[i].score = 100.0;
+      }
+      // Add logs only at the end of the episode
+      env->agent_logs[i].food_nb = (float)env->foods->size;
+      add_log(env, &env->agent_logs[i]);
+      env->agent_logs[i] = (Log){0};
+    }
+
     c_reset(env);
     if (alive_agents == 0) {
       memset(env->terminals, 1, env->num_agents * sizeof(unsigned char)); 
@@ -604,9 +595,9 @@ void c_step(CCpr *env) {
 
 // Raylib client
 Color COLORS[] = {
-    (Color){255, 0, 0, 255},     (Color){170, 170, 170, 255},
+    (Color){255, 0, 0, 255},     (Color){0, 200, 200, 255},
     (Color){255, 255, 0, 255},   (Color){0, 255, 0, 255},
-    (Color){0, 255, 255, 255},   (Color){0, 128, 255, 255},
+    (Color){255, 255, 255, 255},   (Color){0, 128, 255, 255},
     (Color){128, 128, 128, 255}, (Color){255, 0, 0, 255},
     (Color){255, 255, 255, 255}, (Color){255, 85, 85, 255},
     (Color){170, 170, 170, 255}, (Color){0, 255, 255, 255},
@@ -636,7 +627,7 @@ Renderer *init_renderer(int cell_size, int width, int height) {
   InitWindow(width * cell_size, height * cell_size, "CPR");
   SetTargetFPS(10);
 
-  renderer->puffer = LoadTexture("resources/shared/puffers_128.png");
+  renderer->puffer = LoadTexture("resources/shared/puffers.png");
   return renderer;
 }
 
@@ -668,22 +659,25 @@ void c_render(CCpr *env) {
       } else if (tile == WALL) {
         DrawRectangle(c * ts, r * ts, ts, ts, (Color){227, 227, 227, 255});
       } else if (tile == NORMAL_FOOD || tile == INTERACTIVE_FOOD) {
-        DrawRectangle(c * ts, r * ts, ts, ts, COLORS[tile]);
+
+        Rectangle source_rect = (Rectangle){0, 128*2, 128, 128};
+        Rectangle dest_rect = (Rectangle){c * ts + ts/2, r * ts + ts/2, ts, ts};        
+        DrawTexturePro(renderer->puffer, source_rect, dest_rect,
+                       (Vector2){ts/2, ts/2}, 0, COLORS[tile]);
       } else {
 
         int agent_id = get_agent_id_from_tile(tile);
-        int col_id = agent_id % (sizeof(COLORS) / sizeof(COLORS[0]));
-        Color color = COLORS[col_id];
-        int starting_sprite_x = 0;
+        int col_id = (agent_id % 8) * 128;
+        int starting_sprite_y = 0;
         float rotation = env->agents[agent_id].direction * 90.0f;
         if (rotation == 180) {
-          starting_sprite_x = 128;
+          starting_sprite_y = 128;
           rotation = 0;
         }
-        Rectangle source_rect = (Rectangle){starting_sprite_x, 0, 128, 128};
+        Rectangle source_rect = (Rectangle){col_id, starting_sprite_y, 128, 128};
         Rectangle dest_rect = (Rectangle){c * ts + ts/2, r * ts + ts/2, ts, ts};        
         DrawTexturePro(renderer->puffer, source_rect, dest_rect,
-                       (Vector2){ts/2, ts/2}, rotation, color);
+                       (Vector2){ts/2, ts/2}, rotation, (Color){255,255,255,255});
       }
     }
   }
