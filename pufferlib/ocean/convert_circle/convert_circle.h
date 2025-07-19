@@ -151,8 +151,8 @@ void c_step(ConvertCircle *env) {
     agent->y = clip(agent->y, 16, env->height - 16);
 
     if (rand() % env->num_agents == 0) {
-      env->agents[i].x = env->width / 2.0f + random_float(-10.0f, 10.0f);
-      env->agents[i].y = env->height / 2.0f + random_float(-10.0f, 10.0f);
+      env->agents[i].x = env->width / 2.0f;// + random_float(-10.0f, 10.0f);
+      env->agents[i].y = env->height / 2.0f;// + random_float(-10.0f, 10.0f);
     }
 
     for (int f = 0; f < env->num_factories; f++) {
@@ -165,6 +165,8 @@ void c_step(ConvertCircle *env) {
       }
       if (factory->item == agent->item) {
         agent->item = (agent->item + 1) % env->num_resources;
+        agent->x = env->width / 2.0f;
+        agent->y = env->height / 2.0f;
         env->log.perf += 1.0f;
         env->log.score += 1.0f;
         env->log.episode_length += agent->episode_length;

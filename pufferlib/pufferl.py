@@ -131,6 +131,15 @@ class PuffeRL:
                 f'minibatch_size {self.minibatch_size} must be divisible by bptt_horizon {horizon}'
             )
 
+        if config["use_epo"]:
+            assert config['update_epochs'] == 1, "EPO requires update_epochs=1"
+            assert config['batch_size'] == total_agents * config['bptt_horizon'], "Batch size must be auto for EPO"
+            self.population_nb = config["population"]
+            self.genes = torch.randn(int(self.population_nb), config['gene_dim'], device=device)
+            self.agents_per_genome = total_agents // self.population_nb
+            assert self.agents_per_genome <= self.minibatch_segments, \
+            f'Agents per genome {self.agents_per_genome} must be <= minibatch_segments {self.minibatch_segments}'
+
         # Torch compile
         self.uncompiled_policy = policy
         self.policy = policy
@@ -250,6 +259,13 @@ class PuffeRL:
                     state['lstm_h'] = self.lstm_h[env_id.start]
                     state['lstm_c'] = self.lstm_c[env_id.start]
 
+                if config['use_epo']:
+                    gene_st = env_id.start // self.agents_per_genome
+                    gene_end = env_id.stop // self.agents_per_genome
+                    genes = self.genes[gene_st:gene_end]
+                    genes = genes.repeat_interleave(self.agents_per_genome, dim=0)
+                    state['gene'] = genes
+
                 logits, value = self.policy.forward_eval(o_device, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
                 r = torch.clamp(r, -1, 1)
@@ -324,21 +340,70 @@ class PuffeRL:
         anneal_beta = b0 + (1 - b0)*a*self.epoch/self.total_epochs
         self.ratio[:] = 1
 
+        if config['use_epo']:
+            # We need to get the master values & advantages for the batch
+            genes = self.genes[0].expand((self.observations.shape[0], self.observations.shape[1], config['gene_dim']))
+            state = dict(
+                action=self.actions,
+                lstm_h=None,
+                lstm_c=None,
+            )
+            state['gene'] = genes.reshape(-1, config['gene_dim'])
+            with torch.no_grad():
+                old_master_logits, old_master_value = self.policy(self.observations, state)
+                old_master_actions, old_master_logprobs, master_entropy = pufferlib.pytorch.sample_logits(old_master_logits, action=self.actions)
+                master_adv = torch.zeros(self.values.shape, device=device)
+            torch.ops.pufferlib.compute_puff_advantage(old_master_value, self.rewards,
+                self.terminals, self.ratio, master_adv, config['gamma'],
+                config['gae_lambda'], config['vtrace_rho_clip'], config['vtrace_c_clip'])
+            old_master_logprobs = old_master_logprobs.reshape(-1, config['bptt_horizon'])
+        
         for mb in range(self.total_minibatches):
             profile('train_misc', epoch, nest=True)
             self.amp_context.__enter__()
 
             shape = self.values.shape
             advantages = torch.zeros(shape, device=device)
-            advantages = compute_puff_advantage(self.values, self.rewards,
+            # TODO: robustify
+            # TODO: should only compute once pre loop?
+            torch.ops.pufferlib.compute_puff_advantage(self.values, self.rewards,
                 self.terminals, self.ratio, advantages, config['gamma'],
                 config['gae_lambda'], config['vtrace_rho_clip'], config['vtrace_c_clip'])
 
             profile('train_copy', epoch)
             adv = advantages.abs().sum(axis=1)
+            samples = self.minibatch_segments
+            if config["use_epo"]:
+                # Fitness value per epo_agent
+                adv = adv.reshape(self.population_nb, -1)
+                adv = adv.mean(axis=1)
+                fitness_idx = adv[1:].sort(descending=True).indices + 1 # We remove the master's genome
+                samples //= self.agents_per_genome
+
             prio_weights = torch.nan_to_num(adv**a, 0, 0, 0)
             prio_probs = (prio_weights + 1e-6)/(prio_weights.sum() + 1e-6)
-            idx = torch.multinomial(prio_probs, self.minibatch_segments)
+            idx = torch.multinomial(prio_probs, samples)
+
+            if config["use_epo"]:
+                # We prioritize replay based on fitness value
+                # And select every agent trajectories for each selected genome
+                offsets = torch.arange(self.agents_per_genome, dtype=torch.long)
+                sample_indices = (idx*self.agents_per_genome).unsqueeze(1) + offsets.unsqueeze(0)
+                flat_indices = sample_indices.view(-1)
+                assert len(flat_indices) == self.minibatch_segments, \
+                    f'Expected {self.minibatch_segments} indices, got {len(flat_indices)}'
+                unique_indices = torch.unique(flat_indices)
+                has_duplicates = len(unique_indices) != len(flat_indices)
+                assert not has_duplicates, \
+                    f'Sampled indices {flat_indices} contain duplicates, expected unique indices'
+                idx = flat_indices
+                prio_probs = torch.repeat_interleave(prio_probs, self.agents_per_genome)
+                prio_probs /= self.agents_per_genome
+
+                mb_old_master_logprobs = old_master_logprobs[idx]
+                mb_master_adv = master_adv[idx]
+                mb_old_master_value = old_master_value[idx]
+
             mb_prio = (self.segments*prio_probs[idx, None])**-anneal_beta
             mb_obs = self.observations[idx]
             mb_actions = self.actions[idx]
@@ -360,7 +425,17 @@ class PuffeRL:
                 lstm_h=None,
                 lstm_c=None,
             )
+            if config['use_epo']:
+                # We get the corresponding genes for the minibatch
+                # And we repeat each gene to match the observation shape
+                gene_idx = idx // self.agents_per_genome
+                gene_idx = gene_idx.repeat_interleave(config['bptt_horizon'], dim=0)
+                assert gene_idx.shape[0] == mb_obs.shape[0] * mb_obs.shape[1], \
+                    f'Expected {mb_obs.shape[0] * mb_obs.shape[1]} genes, got {gene_idx.shape[0]}'
+                state['gene'] = self.genes[gene_idx]
 
+            # Here we should have the "new" policy, which is the same on the first epoch
+            # But actually gets different if we accumulate minibatches
             logits, newvalue = self.policy(mb_obs, state)
             actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
 
@@ -370,15 +445,32 @@ class PuffeRL:
             ratio = logratio.exp()
             self.ratio[idx] = ratio.detach()
 
+            if config['use_epo']:
+                # We get the master's logits and values for the minibatch, 
+                # Because we want the off policy loss for the master (eq 3 in SAPG, 4 in EPO)
+                genes = self.genes[0].expand((mb_obs.shape[0], mb_obs.shape[1], config['gene_dim']))
+                state = dict(
+                    action=mb_actions,
+                    lstm_h=None,
+                    lstm_c=None,
+                )
+                state['gene'] = genes.reshape(-1, config['gene_dim'])
+                master_logits, master_value = self.policy(mb_obs, state)
+                master_actions, master_newlogprobs, master_entropy = pufferlib.pytorch.sample_logits(master_logits, action=mb_actions)
+
+
+            # TODO: Only do this if we are KL clipping? Saves 1-2% compute
             with torch.no_grad():
                 old_approx_kl = (-logratio).mean()
                 approx_kl = ((ratio - 1) - logratio).mean()
                 clipfrac = ((ratio - 1.0).abs() > config['clip_coef']).float().mean()
 
+            # This does nothing? 
             adv = advantages[idx]
             adv = compute_puff_advantage(mb_values, mb_rewards, mb_terminals,
                 ratio, adv, config['gamma'], config['gae_lambda'],
                 config['vtrace_rho_clip'], config['vtrace_c_clip'])
+            # Because it's overwritten here??
             adv = mb_advantages
             adv = mb_prio * (adv - adv.mean()) / (adv.std() + 1e-8)
 
@@ -387,11 +479,30 @@ class PuffeRL:
             pg_loss2 = -adv * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef)
             pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
+            if config['use_epo']:
+                on_loss = pg_loss
+                # Now we construct off policy loss for the master
+                master_newlogprobs = master_newlogprobs.reshape(mb_logprobs.shape)
+                master_logratio = master_newlogprobs - mb_logprobs
+                mu = (mb_old_master_logprobs - mb_logprobs).exp()
+                master_ratio = master_logratio.exp()
+                off_loss1 = - master_ratio * mb_master_adv
+                off_loss2 = - mb_master_adv * torch.clamp(master_ratio, mu* (1 - clip_coef), mu* (1 + clip_coef))
+                off_loss = torch.max(off_loss1, off_loss2).mean()
+                pg_loss = on_loss + off_loss * config['epo_coef']
+
             newvalue = newvalue.view(mb_returns.shape)
             v_clipped = mb_values + torch.clamp(newvalue - mb_values, -vf_clip, vf_clip)
             v_loss_unclipped = (newvalue - mb_returns) ** 2
             v_loss_clipped = (v_clipped - mb_returns) ** 2
             v_loss = 0.5*torch.max(v_loss_unclipped, v_loss_clipped).mean()
+
+            if config['use_epo']:
+                v_on_loss = v_loss
+                v_off_target =  (mb_master_adv + mb_old_master_value)
+                v_off_loss = (master_value - v_off_target) ** 2
+                v_off_loss = v_off_loss.mean()
+                v_loss = v_on_loss + v_off_loss * config['epo_coef']
 
             entropy_loss = entropy.mean()
 
@@ -410,6 +521,8 @@ class PuffeRL:
             losses['approx_kl'] += approx_kl.item() / self.total_minibatches
             losses['clipfrac'] += clipfrac.item() / self.total_minibatches
             losses['importance'] += ratio.mean().item() / self.total_minibatches
+            losses['mean_rewards'] += mb_rewards.sum(axis=1).mean().item() / self.total_minibatches
+            losses['mean_returns'] += mb_returns.sum(axis=1).mean().item() / self.total_minibatches
 
             # Learn on accumulated minibatches
             profile('learn', epoch)
@@ -419,10 +532,55 @@ class PuffeRL:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
+
         # Reprioritize experience
         profile('train_misc', epoch)
         if config['anneal_lr']:
             self.scheduler.step()
+
+        if config['use_epo']:
+            # Genetic mutations
+            shape = self.values.shape
+            advantages = torch.zeros(shape, device=device)
+            torch.ops.pufferlib.compute_puff_advantage(self.values, self.rewards,
+                self.terminals, self.ratio, advantages, config['gamma'],
+                config['gae_lambda'], config['vtrace_rho_clip'], config['vtrace_c_clip'])
+
+            adv = advantages.abs().sum(axis=1)
+            if config["use_epo"]:
+                # Fitness value per epo_agent
+                adv = adv.reshape(self.population_nb, -1)
+                adv = adv.mean(axis=1)
+                fitness_idx = adv[1:].sort(descending=True).indices + 1 # We remove the master's genome
+
+                # Genetic selection here 
+                criterion = adv[1:].max() - adv[1:].min()
+                # Only start genetic mutation if meaningful differences in performances
+                if criterion > config['epo_gamma'] * adv[1:].median() and False:
+                    elites = fitness_idx[:self.population_nb//4]
+                    assert elites.max() < len(self.genes), "Elite indices out of bounds!"
+                    assert 0 not in elites, "Master shouldn't be picked for mutation!"
+                    next_gen = torch.zeros_like(self.genes)
+                    next_gen[:len(elites)] = self.genes[elites]
+                    current_size = len(elites)
+                    while current_size < self.population_nb - 1: # -1 for the master's genome
+                        e_id = torch.multinomial(torch.ones(len(elites)), 2, replacement=False)
+                        gen_ids = elites[e_id]
+                        gen1_id, gen2_id = gen_ids[0], gen_ids[1]
+                        gen1, gen2 = self.genes[gen1_id], self.genes[gen2_id]
+                        new_gene = (gen1 + gen2) / 2
+                        noise = torch.normal(0, config['epo_mutation_noise'], size= new_gene.shape, device=device)
+                        new_gene += noise
+                        next_gen[current_size] = new_gene
+                        current_size += 1
+
+                    # Update genes, except master's 
+                    print(f"Mutated at {self.epoch} gap was {criterion-config['epo_gamma'] * adv[1:].median():.4f}")
+                    self.genes[1:] = next_gen[:-1]
+
+            # Only the master matters for scoring
+            losses['mean_rewards'] = self.rewards[:self.agents_per_genome].sum(axis=1).mean()
+            losses['mean_returns'] = (advantages[:self.agents_per_genome] + self.values[:self.agents_per_genome]).sum(axis=1).mean()
 
         y_pred = self.values.flatten()
         y_true = advantages.flatten() + self.values.flatten()
@@ -520,6 +678,10 @@ class PuffeRL:
             'model_name': model_name,
             'run_id': run_id,
         }
+
+        if self.config['use_epo']:
+            state['genes'] = self.genes.cpu().numpy()
+
         state_path = os.path.join(path, 'trainer_state.pt')
         torch.save(state, state_path + '.tmp')
         os.rename(state_path + '.tmp', state_path)
@@ -951,6 +1113,18 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
         )
 
+
+    if args['train']['use_epo']:
+        genes = load_genes(args, vecenv)
+
+        # This displays all genomes
+        agents_per_genoms = vecenv.num_agents // len(genes) 
+        state['gene'] = genes.repeat_interleave(agents_per_genoms, dim=0)
+
+        # Replace with this to get only a single genome
+        state['gene'] = genes[0].expand(ob.shape[0], -1)
+        
+
     frames = []
     while True:
         render = driver.render()
@@ -1067,6 +1241,18 @@ def load_env(env_name, args):
     make_env = env_module.env_creator(env_name)
     return pufferlib.vector.make(make_env, env_kwargs=args['env'], **args['vec'])
 
+def load_genes(args, vecenv):
+    load_path = args['load_model_path']
+    if load_path == 'latest':
+        load_path = max(glob.glob("experiments/*.pt"), key=os.path.getctime)
+
+    if load_path is not None:
+        state_path = os.path.join(*load_path.split('/')[:-1], 'trainer_state.pt')
+        trainer_state = torch.load(state_path, map_location=args['train']['device'], weights_only=False)
+        genes = torch.tensor(trainer_state['genes'], device=args['train']['device'])
+
+    return genes
+
 def load_policy(args, vecenv):
     package = args['package']
     module_name = 'pufferlib.ocean' if package == 'ocean' else f'pufferlib.environments.{package}'
@@ -1074,7 +1260,7 @@ def load_policy(args, vecenv):
 
     device = args['train']['device']
     policy_cls = getattr(env_module.torch, args['policy_name'])
-    policy = policy_cls(vecenv.driver_env, **args['policy'])
+    policy = policy_cls(vecenv.driver_env, **args['policy'], **args['train'])
 
     rnn_name = args['rnn_name']
     if rnn_name is not None:
@@ -1108,6 +1294,8 @@ def load_policy(args, vecenv):
         #optim_state = torch.load(state_path)['optimizer_state_dict']
         #pufferl.optimizer.load_state_dict(optim_state)
 
+    
+
     return policy
 
 def load_config(env_name):
@@ -1129,8 +1317,8 @@ def load_config(env_name):
     parser.add_argument('--wandb-project', type=str, default='pufferlib')
     parser.add_argument('--wandb-group', type=str, default='debug')
     parser.add_argument('--neptune', action='store_true', help='Use neptune for logging')
-    parser.add_argument('--neptune-name', type=str, default='pufferai')
-    parser.add_argument('--neptune-project', type=str, default='ablations')
+    parser.add_argument('--neptune-name', type=str, default='boxingbytes')
+    parser.add_argument('--neptune-project', type=str, default='pufferai')
     parser.add_argument('--local-rank', type=int, default=0, help='Used by torchrun for DDP')
     parser.add_argument('--tag', type=str, default=None, help='Tag for experiment')
     args = parser.parse_known_args()[0]

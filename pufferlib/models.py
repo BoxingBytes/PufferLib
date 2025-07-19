@@ -21,8 +21,14 @@ class Default(nn.Module):
     the recurrent cell into encode_observations and put everything after
     into decode_actions.
     '''
-    def __init__(self, env, hidden_size=128):
+    def __init__(self, env, hidden_size=128, **kwargs):
         super().__init__()
+
+        input_size = 0
+        if kwargs.get('use_epo', False): 
+            genome_dim = kwargs['gene_dim']
+            input_size = genome_dim
+
         self.hidden_size = hidden_size
         self.is_multidiscrete = isinstance(env.single_action_space,
                 pufferlib.spaces.MultiDiscrete)
@@ -35,11 +41,12 @@ class Default(nn.Module):
 
         if self.is_dict_obs:
             self.dtype = pufferlib.pytorch.nativize_dtype(env.emulated)
-            input_size = int(sum(np.prod(v.shape) for v in env.env.observation_space.values()))
+            input_size += int(sum(np.prod(v.shape) for v in env.env.observation_space.values()))
             self.encoder = nn.Linear(input_size, self.hidden_size)
         else:
+            input_size += np.prod(env.single_observation_space.shape)
             self.encoder = torch.nn.Sequential(
-                nn.Linear(np.prod(env.single_observation_space.shape), hidden_size),
+                nn.Linear(input_size, hidden_size),
                 nn.GELU(),
             )
 
@@ -69,13 +76,18 @@ class Default(nn.Module):
 
     def encode_observations(self, observations, state=None):
         '''Encodes a batch of observations into hidden states. Assumes
-        no time dimension (handled by LSTM wrappers).'''
+        no time dimension (handled by LSTM wrappers).'''            
         batch_size = observations.shape[0]
         if self.is_dict_obs:
             observations = pufferlib.pytorch.nativize_tensor(observations, self.dtype)
             observations = torch.cat([v.view(batch_size, -1) for v in observations.values()], dim=1)
         else: 
             observations = observations.view(batch_size, -1)
+
+        genome = state.get('gene', None)
+        if genome is not None:
+            observations = torch.cat((observations, genome), dim=1)
+            
         return self.encoder(observations.float())
 
     def decode_actions(self, hidden):
