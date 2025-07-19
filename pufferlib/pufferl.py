@@ -556,7 +556,7 @@ class PuffeRL:
                 # Genetic selection here 
                 criterion = adv[1:].max() - adv[1:].min()
                 # Only start genetic mutation if meaningful differences in performances
-                if criterion > config['epo_gamma'] * adv[1:].median() and False:
+                if criterion > config['epo_gamma'] * adv[1:].median():
                     elites = fitness_idx[:self.population_nb//4]
                     assert elites.max() < len(self.genes), "Elite indices out of bounds!"
                     assert 0 not in elites, "Master shouldn't be picked for mutation!"
