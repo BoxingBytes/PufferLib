@@ -138,13 +138,14 @@ class PuffeRL:
             # All this to force every agent in a Cenv to share the same skill
             pop_size = config['lsd_population_size']
             tot_envs = vecenv.num_environments * config['env_conf']['num_envs']
-            env_per_skill = pop_size // tot_envs
+            env_per_skill = tot_envs // pop_size
             assert env_per_skill > 0, f"env_per_skill must be > 0, got {env_per_skill}"
-            assert pop_size % tot_envs == 0, f"pop_size {pop_size} must be divisible by tot_envs {tot_envs}"
+            assert tot_envs % pop_size == 0, f"pop_size {pop_size} must be divisible by tot_envs {tot_envs}"
             agents_per_cenv = config['env_conf'].get('num_agents', vecenv.driver_env.num_agents//config['env_conf']['num_envs'])
             self.agents_per_skill = agents_per_cenv * env_per_skill
 
-            self.skills = torch.randn(size=(pop_size, config['lsd_skill_dim']), device=device) # TODO: other skill init? read LSD
+            self.skills = torch.rand(size=(pop_size, config['lsd_skill_dim']), device=device) # TODO: other skill init? read LSD
+            self.skills -= self.skills.mean(dim=1, keepdim=True) # 0 mean, as in the paper
             # self.skills = torch.repeat_interleave(skills, repeats=self.agents_per_skill, dim=0)
 
         # Torch compile
@@ -606,6 +607,9 @@ class PuffeRL:
             'model_name': model_name,
             'run_id': run_id,
         }
+        if self.config['lsd']:
+            state['skills'] = self.skills.cpu().numpy()
+
         state_path = os.path.join(path, 'trainer_state.pt')
         torch.save(state, state_path + '.tmp')
         os.rename(state_path + '.tmp', state_path)
@@ -951,7 +955,6 @@ class WandbLogger:
  
 def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     args = args or load_config(env_name)
-
     # Assume TorchRun DDP is used if LOCAL_RANK is set
     if 'LOCAL_RANK' in os.environ:
         world_size = int(os.environ.get('WORLD_SIZE', 1))
@@ -1041,6 +1044,18 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             lstm_h=torch.zeros(num_agents, policy.hidden_size, device=device),
             lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
         )
+
+    if args['train']['lsd']:
+        skills = load_skills(args, vecenv)
+
+        # This displays all skills
+        agents_per_skill = vecenv.num_agents // len(skills) 
+        state['skills'] = skills.repeat_interleave(agents_per_skill, dim=0)
+
+        # Replace with this to get only a single genome
+        # state['skills'] = skills[3].expand(ob.shape[0], -1)
+        # breakpoint()
+
 
     frames = []
     while True:
@@ -1200,6 +1215,18 @@ def load_policy(args, vecenv, env_name=''):
         #pufferl.optimizer.load_state_dict(optim_state)
 
     return policy
+
+def load_skills(args, vecenv):
+    load_path = args['load_model_path']
+    if load_path == 'latest':
+        load_path = max(glob.glob("experiments/*.pt"), key=os.path.getctime)
+
+    if load_path is not None:
+        state_path = os.path.join(*load_path.split('/')[:-1], 'trainer_state.pt')
+        trainer_state = torch.load(state_path, map_location=args['train']['device'], weights_only=False)
+        skills = torch.tensor(trainer_state['skills'], device=args['train']['device'])
+
+    return skills
 
 def load_config(env_name):
     parser = argparse.ArgumentParser(
