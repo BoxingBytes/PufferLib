@@ -1053,8 +1053,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         state['skills'] = skills.repeat_interleave(agents_per_skill, dim=0)
 
         # Replace with this to get only a single genome
-        # state['skills'] = skills[3].expand(ob.shape[0], -1)
-        # breakpoint()
+        state['skills'] = skills[60].expand(ob.shape[0], -1)
 
 
     frames = []
