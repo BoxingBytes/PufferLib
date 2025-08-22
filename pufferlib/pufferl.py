@@ -378,7 +378,7 @@ class PuffeRL:
             # compute dot product on last dim to get (mb_segs, bptt, 1)
             r_lsd = (latent_diff * skills).sum(dim=-1)
             r_lsd = torch.clamp(r_lsd, -1, 1)
-            
+
             # Overwrite rewards with this
             self.rewards = r_lsd
 
@@ -518,6 +518,10 @@ class PuffeRL:
         var_y = y_true.var()
         explained_var = torch.nan if var_y == 0 else 1 - (y_true - y_pred).var() / var_y
         losses['explained_variance'] = explained_var.item()
+
+        if config['lsd']:
+            self.skills = torch.rand(size=(config['lsd_population_size'], config['lsd_skill_dim']), device=device) # TODO: other skill init? read LSD
+            self.skills -= self.skills.mean(dim=1, keepdim=True) # 0 mean, as in the paper
 
         profile.end()
         logs = None
