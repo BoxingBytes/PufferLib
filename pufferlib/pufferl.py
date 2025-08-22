@@ -377,6 +377,8 @@ class PuffeRL:
 
             # compute dot product on last dim to get (mb_segs, bptt, 1)
             r_lsd = (latent_diff * skills).sum(dim=-1)
+            r_lsd = torch.clamp(r_lsd, -1, 1)
+            
             # Overwrite rewards with this
             self.rewards = r_lsd
 
@@ -1053,7 +1055,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         state['skills'] = skills.repeat_interleave(agents_per_skill, dim=0)
 
         # Replace with this to get only a single genome
-        state['skills'] = skills[60].expand(ob.shape[0], -1)
+        # state['skills'] = skills[4].expand(ob.shape[0], -1)
 
 
     frames = []
