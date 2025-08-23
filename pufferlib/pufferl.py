@@ -1053,13 +1053,14 @@ def eval(env_name, args=None, vecenv=None, policy=None):
 
     if args['train']['lsd']:
         skills = load_skills(args, vecenv)
+        skills_rn = torch.rand(size=skills.shape, device=device)
+        skills_rn -= skills_rn.mean(dim=1, keepdim=True) 
 
         # This displays all skills
         agents_per_skill = vecenv.num_agents // len(skills) 
-        state['skills'] = skills.repeat_interleave(agents_per_skill, dim=0)
-
+        state['skills'] = skills_rn.repeat_interleave(agents_per_skill, dim=0)
         # Replace with this to get only a single genome
-        # state['skills'] = skills[4].expand(ob.shape[0], -1)
+        # state['skills'] = skills_rn[15].expand(ob.shape[0], -1)
 
 
     frames = []
