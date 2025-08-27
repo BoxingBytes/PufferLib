@@ -539,7 +539,7 @@ class PuffeRL:
         if config['lsd']:
             losses['r_lsd'] = r_lsd.mean().item()
             losses['cosine_align'] = cosing_align.mean().item()
-
+            losses['phi_norm'] = torch.linalg.vector_norm(latent_diff, dim=-1).mean().item()
             # Compute average spectral norm
             if config['use_rnn']:
                 pol = self.policy.policy
@@ -1093,7 +1093,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
 
     if args['train']['lsd']:
         skills = load_skills(args, vecenv)
-        num_agents_per_env = args['env']['num_agents']
+        num_agents_per_env = args['env'].get('num_agents',1)
         breakpoint()
         if num_agents >= len(skills): 
             # We have enough agents to split skills in one env
