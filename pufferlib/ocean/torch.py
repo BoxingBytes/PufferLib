@@ -1071,6 +1071,11 @@ class LSD(nn.Module):
             ),
             nn.GELU(),
             nn.utils.parametrizations.spectral_norm(
+                nn.Linear(hidden_size, hidden_size),
+                n_power_iterations=1
+            ),
+            nn.GELU(),
+            nn.utils.parametrizations.spectral_norm(
                 nn.Linear(self.hidden_size, skill_dim),
                 n_power_iterations=1
             ),
