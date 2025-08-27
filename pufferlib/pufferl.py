@@ -146,7 +146,8 @@ class PuffeRL:
 
             N, D = pop_size, config['lsd_skill_dim']
             self.skills = torch.full(size=(N, D), fill_value=-1/(D-1), device=device)
-            idx = torch.randint(0, D, size=(N,), device=device)
+            # idx = torch.randint(0, D, size=(N,), device=device)
+            idx = torch.arange(N, device=device)
             self.skills[torch.arange(N, device=device), idx] = 1
             # breakpoint()
             # self.skills = torch.rand(size=(pop_size, config['lsd_skill_dim']), device=device) # TODO: other skill init? read LSD
@@ -556,10 +557,11 @@ class PuffeRL:
             # self.skills = torch.rand(size=(config['lsd_population_size'], config['lsd_skill_dim']), device=device) # TODO: other skill init? read LSD
             # self.skills -= self.skills.mean(dim=1, keepdim=True) # 0 mean, as in the paper
 
-            N, D = config['lsd_population_size'], config['lsd_skill_dim']
-            self.skills = torch.full(size=(N, D), fill_value=-1/(D-1), device=device)
-            idx = torch.randint(0, D, size=(N,), device=device)
-            self.skills[torch.arange(N, device=device), idx] = 1
+            # N, D = config['lsd_population_size'], config['lsd_skill_dim']
+            # self.skills = torch.full(size=(N, D), fill_value=-1/(D-1), device=device)
+            # idx = torch.randint(0, D, size=(N,), device=device)
+            # idx = torch.arange(N, device=device)
+            # self.skills[torch.arange(N, device=device), idx] = 1
             
         profile.end()
         logs = None
@@ -1107,7 +1109,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
     
         # Replace with this to get only a single genome
         # breakpoint()
-        state['skills'] = skills[3].expand(ob.shape[0], -1)
+        state['skills'] = skills[1].expand(ob.shape[0], -1)
 
 
     frames = []
