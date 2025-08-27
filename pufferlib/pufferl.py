@@ -406,6 +406,10 @@ class PuffeRL:
             adv = advantages.abs().sum(axis=1)
             prio_weights = torch.nan_to_num(adv**a, 0, 0, 0)
             prio_probs = (prio_weights + 1e-6)/(prio_weights.sum() + 1e-6)
+            if config['lsd']:
+                # test
+                prio_probs = torch.ones_like(prio_probs)/len(prio_probs)
+            
             idx = torch.multinomial(prio_probs, self.minibatch_segments)
             mb_prio = (self.segments*prio_probs[idx, None])**-anneal_beta
             mb_obs = self.observations[idx]
@@ -1088,6 +1092,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
     if args['train']['lsd']:
         skills = load_skills(args, vecenv)
         num_agents_per_env = args['env']['num_agents']
+        breakpoint()
         if num_agents >= len(skills): 
             # We have enough agents to split skills in one env
             agents_per_skill = num_agents_per_env // len(skills)
@@ -1102,7 +1107,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
     
         # Replace with this to get only a single genome
         # breakpoint()
-        # state['skills'] = skills[3].expand(ob.shape[0], -1)
+        state['skills'] = skills[3].expand(ob.shape[0], -1)
 
 
     frames = []
