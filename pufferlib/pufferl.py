@@ -144,8 +144,13 @@ class PuffeRL:
             agents_per_cenv = config['env_conf'].get('num_agents', vecenv.driver_env.num_agents//config['env_conf']['num_envs'])
             self.agents_per_skill = agents_per_cenv * env_per_skill
 
-            self.skills = torch.rand(size=(pop_size, config['lsd_skill_dim']), device=device) # TODO: other skill init? read LSD
-            self.skills -= self.skills.mean(dim=1, keepdim=True) # 0 mean, as in the paper
+            N, D = pop_size, config['lsd_skill_dim']
+            self.skills = torch.full(size=(N, D), fill_value=-1/(D-1), device=device)
+            idx = torch.randint(0, D, size=(N,), device=device)
+            self.skills[torch.arange(N, device=device), idx] = 1
+            # breakpoint()
+            # self.skills = torch.rand(size=(pop_size, config['lsd_skill_dim']), device=device) # TODO: other skill init? read LSD
+            # self.skills -= self.skills.mean(dim=1, keepdim=True) # 0 mean, as in the paper
             # self.skills = torch.repeat_interleave(skills, repeats=self.agents_per_skill, dim=0)
 
         # Torch compile
@@ -378,6 +383,11 @@ class PuffeRL:
             # compute dot product on last dim to get (mb_segs, bptt, 1)
             r_lsd = (latent_diff * skills).sum(dim=-1)
             r_lsd = torch.clamp(r_lsd, -1, 1)
+            cosing_align = torch.nn.functional.cosine_similarity(
+                latent_diff, 
+                skills, 
+                dim=-1,
+            )
 
             # Overwrite rewards with this
             self.rewards = r_lsd
@@ -499,6 +509,8 @@ class PuffeRL:
             losses['approx_kl'] += approx_kl.item() / self.total_minibatches
             losses['clipfrac'] += clipfrac.item() / self.total_minibatches
             losses['importance'] += ratio.mean().item() / self.total_minibatches
+            if config['lsd']:
+                losses['lsd_loss'] += lsd_loss.item() / self.total_minibatches
 
             # Learn on accumulated minibatches
             profile('learn', epoch)
@@ -520,9 +532,31 @@ class PuffeRL:
         losses['explained_variance'] = explained_var.item()
 
         if config['lsd']:
-            self.skills = torch.rand(size=(config['lsd_population_size'], config['lsd_skill_dim']), device=device) # TODO: other skill init? read LSD
-            self.skills -= self.skills.mean(dim=1, keepdim=True) # 0 mean, as in the paper
+            losses['r_lsd'] = r_lsd.mean().item()
+            losses['cosine_align'] = cosing_align.mean().item()
 
+            # Compute average spectral norm
+            if config['use_rnn']:
+                pol = self.policy.policy
+            else:
+                pol = self.policy
+
+            n_modules = 0 
+            for module in pol.discriminator:
+                if isinstance(module, torch.nn.Linear):
+                    n_modules += 1
+                    sigma = torch.linalg.matrix_norm(module.weight, 2).item()
+                    losses['spectral_norm'] += sigma
+            losses['spectral_norm'] /= n_modules
+
+            # self.skills = torch.rand(size=(config['lsd_population_size'], config['lsd_skill_dim']), device=device) # TODO: other skill init? read LSD
+            # self.skills -= self.skills.mean(dim=1, keepdim=True) # 0 mean, as in the paper
+
+            N, D = config['lsd_population_size'], config['lsd_skill_dim']
+            self.skills = torch.full(size=(N, D), fill_value=-1/(D-1), device=device)
+            idx = torch.randint(0, D, size=(N,), device=device)
+            self.skills[torch.arange(N, device=device), idx] = 1
+            
         profile.end()
         logs = None
         self.epoch += 1
@@ -1053,14 +1087,22 @@ def eval(env_name, args=None, vecenv=None, policy=None):
 
     if args['train']['lsd']:
         skills = load_skills(args, vecenv)
-        skills_rn = torch.rand(size=skills.shape, device=device)
-        skills_rn -= skills_rn.mean(dim=1, keepdim=True) 
+        num_agents_per_env = args['env']['num_agents']
+        if num_agents >= len(skills): 
+            # We have enough agents to split skills in one env
+            agents_per_skill = num_agents_per_env // len(skills)
+        else: 
+            agents_per_skill = vecenv.num_agents // len(skills) 
+
+        # skills_rn = torch.rand(size=skills.shape, device=device)
+        # skills_rn -= skills_rn.mean(dim=1, keepdim=True) 
 
         # This displays all skills
-        agents_per_skill = vecenv.num_agents // len(skills) 
-        state['skills'] = skills_rn.repeat_interleave(agents_per_skill, dim=0)
+        state['skills'] = skills.repeat_interleave(agents_per_skill, dim=0)
+    
         # Replace with this to get only a single genome
-        # state['skills'] = skills_rn[15].expand(ob.shape[0], -1)
+        # breakpoint()
+        # state['skills'] = skills[3].expand(ob.shape[0], -1)
 
 
     frames = []

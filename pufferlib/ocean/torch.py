@@ -1065,12 +1065,14 @@ class LSD(nn.Module):
             nn.Linear(hidden_size, 1), std=1)
         
         self.discriminator = nn.Sequential(
-            nn.utils.spectral_norm(
-                pufferlib.pytorch.layer_init(nn.Linear(self.input_size - skill_dim, hidden_size))
+            nn.utils.parametrizations.spectral_norm(
+                nn.Linear(self.input_size - skill_dim, hidden_size),
+                n_power_iterations=1
             ),
             nn.GELU(),
-            nn.utils.spectral_norm(
-                nn.Linear(self.hidden_size, skill_dim)
+            nn.utils.parametrizations.spectral_norm(
+                nn.Linear(self.hidden_size, skill_dim),
+                n_power_iterations=1
             ),
         )
 
