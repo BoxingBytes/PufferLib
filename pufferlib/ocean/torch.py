@@ -1024,6 +1024,8 @@ class LSD(nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         self.input_size = skill_dim
+        self.obs_shape = env.single_observation_space.shape
+        self.skill_dim = skill_dim
 
         self.is_multidiscrete = isinstance(env.single_action_space,
                 pufferlib.spaces.MultiDiscrete)
@@ -1064,32 +1066,103 @@ class LSD(nn.Module):
         self.value = pufferlib.pytorch.layer_init(
             nn.Linear(hidden_size, 1), std=1)
         
-        self.discriminator = nn.Sequential(
+        # self.discriminator = nn.Sequential(
+        #     nn.utils.parametrizations.spectral_norm(
+        #         nn.Linear(self.input_size - skill_dim, hidden_size),
+        #         n_power_iterations=1
+        #     ),
+        #     nn.GELU(),
+        #     nn.utils.parametrizations.spectral_norm(
+        #         nn.Linear(hidden_size, hidden_size),
+        #         n_power_iterations=1
+        #     ),
+        #     nn.GELU(),
+        #     nn.utils.parametrizations.spectral_norm(
+        #         nn.Linear(self.hidden_size, skill_dim),
+        #         n_power_iterations=1
+        #     ),
+        # )
+
+        self.phi = nn.Sequential(
+            # Input FFN with spectral normalization
             nn.utils.parametrizations.spectral_norm(
                 nn.Linear(self.input_size - skill_dim, hidden_size),
                 n_power_iterations=1
             ),
             nn.GELU(),
+        )
+
+        # LSTM layer
+        self.phi_lstm = nn.LSTM(
+            input_size=hidden_size,
+            hidden_size=hidden_size,
+            num_layers=1,
+            batch_first=True
+        )
+
+        # Output FFN with spectral normalization
+        self.phi_output = nn.Sequential(
             nn.utils.parametrizations.spectral_norm(
                 nn.Linear(hidden_size, hidden_size),
                 n_power_iterations=1
             ),
             nn.GELU(),
             nn.utils.parametrizations.spectral_norm(
-                nn.Linear(self.hidden_size, skill_dim),
+                nn.Linear(hidden_size, skill_dim),
                 n_power_iterations=1
             ),
         )
+        
+    def phi_forward(self, observations, state=None):
+        # batch_size = observations.shape[0]
+        # if self.is_dict_obs:
+        #     observations = pufferlib.pytorch.nativize_tensor(observations, self.dtype)
+        #     observations = torch.cat([v.view(batch_size, -1) for v in observations.values()], dim=1)
+        # else: 
+        #     observations = observations.view(batch_size, -1)
+        # return self.discriminator(observations.float())
 
-    def discriminator_forward(self, observations, state=None):
-        batch_size = observations.shape[0]
-        if self.is_dict_obs:
-            observations = pufferlib.pytorch.nativize_tensor(observations, self.dtype)
-            observations = torch.cat([v.view(batch_size, -1) for v in observations.values()], dim=1)
-        else: 
-            observations = observations.view(batch_size, -1)
-        return self.discriminator(observations.float())
+        x = observations
+        lstm_h = state['lstm_h']
+        lstm_c = state['lstm_c']
 
+        x_shape, space_shape = x.shape, self.obs_shape
+        x_n, space_n = len(x_shape), len(space_shape)
+        if x_shape[-space_n:] != space_shape:
+            raise ValueError('Invalid input tensor shape', x.shape)
+
+        if x_n == space_n + 1:
+            B, TT = x_shape[0], 1
+        elif x_n == space_n + 2:
+            B, TT = x_shape[:2]
+        else:
+            raise ValueError('Invalid input tensor shape', x.shape)
+
+        if lstm_h is not None:
+            assert lstm_h.shape[1] == lstm_c.shape[1] == B, 'LSTM state must be (h, c)'
+            lstm_state = (lstm_h, lstm_c)
+        else:
+            lstm_state = None
+
+        x = x.reshape(B*TT, *space_shape)
+        hidden = self.phi(x)
+        assert hidden.shape == (B*TT, self.hidden_size)
+
+        hidden = hidden.reshape(B, TT, self.hidden_size)
+
+        hidden = hidden.transpose(0, 1)
+        hidden, (lstm_h, lstm_c) = self.phi_lstm.forward(hidden, lstm_state)
+        hidden = hidden.float()
+ 
+        hidden = hidden.transpose(0, 1)
+
+        flat_hidden = hidden.reshape(B*TT, self.hidden_size)
+        logits = self.phi_output(flat_hidden)
+
+        state['hidden'] = hidden
+        state['lstm_h'] = lstm_h.detach()
+        state['lstm_c'] = lstm_c.detach()
+        return logits
         
     def forward_eval(self, observations, state=None):
         hidden = self.encode_observations(observations, state=state)

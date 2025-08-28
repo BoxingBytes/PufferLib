@@ -359,39 +359,51 @@ class PuffeRL:
         self.ratio[:] = 1
 
         if config['lsd']: 
-            # Compute discrim sur les mb_obs_latent (mb_segs, bptt, skill_dim) 
-            if config['use_rnn']:
-                obs_latent = self.policy.policy.discriminator_forward(self.observations.reshape(-1, *self.vecenv.single_observation_space.shape))
-            else: 
-                obs_latent = self.policy.discriminator_forward(self.observations.reshape(-1, *self.vecenv.single_observation_space.shape))
-            obs_latent = obs_latent.reshape(*self.observations.shape[:-1], -1)
+            with torch.no_grad():
+                # Compute discrim sur les mb_obs_latent (mb_segs, bptt, skill_dim) 
+                phi_state = dict(
+                    lstm_h=None,
+                    lstm_c=None,
+                )
+                if config['use_rnn']:
+                    obs_latent = self.policy.policy.phi_forward(
+                        self.observations,
+                        phi_state
+                    )
+                else: 
+                    obs_latent = self.policy.phi_forward(
+                        # self.observations.reshape(-1, *self.vecenv.single_observation_space.shape), 
+                        self.observations, 
+                        phi_state
+                    )
+                obs_latent = obs_latent.reshape(*self.observations.shape[:-1], -1)
 
-            # Get the diff on mb_obs_latent to get \phi(s_{t+1})-\phi(s_t) (mb_segs, bptt-1, skill_dim)
-            # Add the last one to 0, so we get the correct shape (mb_segs, bptt, skill_dim)
-            latent_diff = torch.zeros(obs_latent.shape, device=device)
-            latent_diff[:,:-1,:] = torch.diff(obs_latent, dim=-2)
+                # Get the diff on mb_obs_latent to get \phi(s_{t+1})-\phi(s_t) (mb_segs, bptt-1, skill_dim)
+                # Add the last one to 0, so we get the correct shape (mb_segs, bptt, skill_dim)
+                latent_diff = torch.zeros(obs_latent.shape, device=device)
+                latent_diff[:,:-1,:] = torch.diff(obs_latent, dim=-2)
 
-            # Add logic if terminal or truncation
-            valid_mask = (self.terminals == 0) & (self.truncations == 0)
-            latent_diff[~valid_mask] = 0
+                # Add logic if terminal or truncation
+                valid_mask = (self.terminals == 0) & (self.truncations == 0)
+                latent_diff[~valid_mask] = 0
 
-            # Get the skills for each segment, and repeat to get shape (mb_segs, bptt, skill_dim)
-            skill_idx = torch.arange(end=self.segments) // self.agents_per_skill
-            skills = self.skills[skill_idx].repeat_interleave(
-                latent_diff.shape[1], dim=0
-            ).reshape(*latent_diff.shape[:-1], -1)
+                # Get the skills for each segment, and repeat to get shape (mb_segs, bptt, skill_dim)
+                skill_idx = torch.arange(end=self.segments) // self.agents_per_skill
+                skills = self.skills[skill_idx].repeat_interleave(
+                    latent_diff.shape[1], dim=0
+                ).reshape(*latent_diff.shape[:-1], -1)
 
-            # compute dot product on last dim to get (mb_segs, bptt, 1)
-            r_lsd = (latent_diff * skills).sum(dim=-1)
-            r_lsd = torch.clamp(r_lsd, -1, 1)
-            cosing_align = torch.nn.functional.cosine_similarity(
-                latent_diff, 
-                skills, 
-                dim=-1,
-            )
+                # compute dot product on last dim to get (mb_segs, bptt, 1)
+                r_lsd = (latent_diff * skills).sum(dim=-1)
+                r_lsd = torch.clamp(r_lsd, -1, 1)
+                cosing_align = torch.nn.functional.cosine_similarity(
+                    latent_diff, 
+                    skills, 
+                    dim=-1,
+                )
 
-            # Overwrite rewards with this
-            self.rewards = r_lsd
+                # Overwrite rewards with this
+                self.rewards = r_lsd.detach()
 
         for mb in range(self.total_minibatches):
             profile('train_misc', epoch, nest=True)
@@ -480,11 +492,23 @@ class PuffeRL:
 
             if config['lsd']:
                 # We need this again to not double backprop through discriminator
-                # Compute discrim sur les mb_obs_latent (mb_segs, bptt, skill_dim) 
+                # Compute discrim sur les mb_obs_latent (mb_segs, bptt, skill_dim)
+                phi_state = dict(
+                    lstm_h=None,
+                    lstm_c=None,
+                ) 
                 if config['use_rnn']:
-                    mb_obs_latent = self.policy.policy.discriminator_forward(mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape))
+                    mb_obs_latent = self.policy.policy.phi_forward(
+                        # mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape),
+                        mb_obs,
+                        phi_state
+                    )
                 else: 
-                    mb_obs_latent = self.policy.discriminator_forward(mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape))
+                    mb_obs_latent = self.policy.phi_forward(
+                        # mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape),
+                        mb_obs,
+                        phi_state
+                    )
                 mb_obs_latent = mb_obs_latent.reshape(*mb_obs.shape[:-1], -1)
 
                 # Get the diff on mb_obs_latent to get \phi(s_{t+1})-\phi(s_t) (mb_segs, bptt-1, skill_dim)
@@ -547,11 +571,17 @@ class PuffeRL:
                 pol = self.policy
 
             n_modules = 0 
-            for module in pol.discriminator:
+            for module in pol.phi:
                 if isinstance(module, torch.nn.Linear):
                     n_modules += 1
                     sigma = torch.linalg.matrix_norm(module.weight, 2).item()
                     losses['spectral_norm'] += sigma
+            for module in pol.phi_output:
+                if isinstance(module, torch.nn.Linear):
+                    n_modules += 1
+                    sigma = torch.linalg.matrix_norm(module.weight, 2).item()
+                    losses['spectral_norm'] += sigma
+
             losses['spectral_norm'] /= n_modules
 
             # self.skills = torch.rand(size=(config['lsd_population_size'], config['lsd_skill_dim']), device=device) # TODO: other skill init? read LSD
