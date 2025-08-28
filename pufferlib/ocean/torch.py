@@ -1150,7 +1150,7 @@ class LSD(nn.Module):
 
         hidden = hidden.reshape(B, TT, self.hidden_size)
 
-        hidden = hidden.transpose(0, 1)
+        hidden = hidden.transpose(0, 1).contiguous()
         hidden, (lstm_h, lstm_c) = self.phi_lstm.forward(hidden, lstm_state)
         hidden = hidden.float()
  
