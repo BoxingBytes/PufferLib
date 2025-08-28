@@ -361,21 +361,30 @@ class PuffeRL:
         if config['lsd']: 
             with torch.no_grad():
                 # Compute discrim sur les mb_obs_latent (mb_segs, bptt, skill_dim) 
-                phi_state = dict(
-                    lstm_h=None,
-                    lstm_c=None,
-                )
-                if config['use_rnn']:
-                    obs_latent = self.policy.policy.phi_forward(
-                        self.observations,
-                        phi_state
+
+                # Workaround huge batch sizes bug in cuda > 65k
+                obs_latent_chunk = []
+                B = self.observations.shape[0]
+                max_chunk = 2048
+                for i in range(0, B, max_chunk):
+                    phi_state = dict(
+                        lstm_h=None,
+                        lstm_c=None,
                     )
-                else: 
-                    obs_latent = self.policy.phi_forward(
-                        # self.observations.reshape(-1, *self.vecenv.single_observation_space.shape), 
-                        self.observations, 
-                        phi_state
-                    )
+                    obs_chunk = self.observations[i:i+max_chunk]
+                    if config['use_rnn']:
+                        latent_chunk = self.policy.policy.phi_forward(
+                            obs_chunk,
+                            phi_state
+                        )
+                    else: 
+                        latent_chunk = self.policy.phi_forward(
+                            # self.observations.reshape(-1, *self.vecenv.single_observation_space.shape), 
+                            obs_chunk, 
+                            phi_state
+                        )
+                    obs_latent_chunk.append(latent_chunk)
+                obs_latent = torch.cat(obs_latent_chunk, dim=0)
                 obs_latent = obs_latent.reshape(*self.observations.shape[:-1], -1)
 
                 # Get the diff on mb_obs_latent to get \phi(s_{t+1})-\phi(s_t) (mb_segs, bptt-1, skill_dim)

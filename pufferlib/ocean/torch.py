@@ -1151,8 +1151,6 @@ class LSD(nn.Module):
         hidden = hidden.reshape(B, TT, self.hidden_size)
 
         hidden = hidden.transpose(0, 1).contiguous()
-        breakpoint()
-
         assert hidden.is_contiguous()
 
         hidden, (lstm_h, lstm_c) = self.phi_lstm(hidden, lstm_state)
