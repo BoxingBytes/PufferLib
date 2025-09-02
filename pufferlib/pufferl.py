@@ -1133,7 +1133,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
     if args['train']['lsd']:
         skills = load_skills(args, vecenv)
         num_agents_per_env = args['env'].get('num_agents',1)
-        breakpoint()
+        # breakpoint()
         if num_agents >= len(skills): 
             # We have enough agents to split skills in one env
             agents_per_skill = num_agents_per_env // len(skills)
@@ -1148,7 +1148,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
     
         # Replace with this to get only a single genome
         # breakpoint()
-        state['skills'] = skills[1].expand(ob.shape[0], -1)
+        # state['skills'] = skills[2].expand(ob.shape[0], -1)
 
 
     frames = []
