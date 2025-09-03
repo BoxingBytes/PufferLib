@@ -133,10 +133,10 @@ class PuffeRL:
                 f'minibatch_size {self.minibatch_size} must be divisible by bptt_horizon {horizon}'
             )
 
-        # LSD
-        if config["lsd"]:
+        # metra
+        if config["metra"]:
             # All this to force every agent in a Cenv to share the same skill
-            pop_size = config['lsd_population_size']
+            pop_size = config['metra_population_size']
             tot_envs = vecenv.num_environments * config['env_conf']['num_envs']
             env_per_skill = tot_envs // pop_size
             assert env_per_skill > 0, f"env_per_skill must be > 0, got {env_per_skill}"
@@ -144,16 +144,15 @@ class PuffeRL:
             agents_per_cenv = config['env_conf'].get('num_agents', vecenv.driver_env.num_agents//config['env_conf']['num_envs'])
             self.agents_per_skill = agents_per_cenv * env_per_skill
 
-            N, D = pop_size, config['lsd_skill_dim']
-            self.skills = torch.full(size=(N, D), fill_value=-1/(D-1), device=device)
-            # idx = torch.randint(0, D, size=(N,), device=device)
-            idx = torch.arange(N, device=device)
-            self.skills[torch.arange(N, device=device), idx] = 1
-            # breakpoint()
-            # self.skills = torch.rand(size=(pop_size, config['lsd_skill_dim']), device=device) # TODO: other skill init? read LSD
-            # self.skills -= self.skills.mean(dim=1, keepdim=True) # 0 mean, as in the paper
-            # self.skills = torch.repeat_interleave(skills, repeats=self.agents_per_skill, dim=0)
-
+            N, D = pop_size, config['metra_skill_dim']
+            if config['metra_continuous']:
+                self.skills = torch.randn(size=(N, D), device=device)
+                self.skills /= torch.linalg.vector_norm(self.skills, dim=-1, keepdim=True) + 1e-8
+            else:
+                self.skills = torch.full(size=(N, D), fill_value=-1/(D-1), device=device)
+                idx = torch.arange(N, device=device)
+                self.skills[torch.arange(N, device=device), idx] = 1
+        
         # Torch compile
         self.uncompiled_policy = policy
         self.policy = policy
@@ -162,10 +161,19 @@ class PuffeRL:
             self.policy.forward_eval = torch.compile(policy, mode=config['compile_mode'])
             pufferlib.pytorch.sample_logits = torch.compile(pufferlib.pytorch.sample_logits, mode=config['compile_mode'])
 
+        main_params = self.policy.parameters()
+        if config['metra']:
+            if config['use_rnn']:
+                metra_pol = self.policy.policy
+            else: 
+                metra_pol = self.policy
+            lambda_param = metra_pol.log_lambda
+            main_params = [p for p in self.policy.parameters() if p is not lambda_param]
+            
         # Optimizer
         if config['optimizer'] == 'adam':
             optimizer = torch.optim.Adam(
-                self.policy.parameters(),
+                main_params,
                 lr=config['learning_rate'],
                 betas=(config['adam_beta1'], config['adam_beta2']),
                 eps=config['adam_eps'],
@@ -176,7 +184,7 @@ class PuffeRL:
             import heavyball.utils
             heavyball.utils.compile_mode = config['compile_mode'] if config['compile'] else None
             optimizer = ForeachMuon(
-                self.policy.parameters(),
+                main_params,
                 lr=config['learning_rate'],
                 betas=(config['adam_beta1'], config['adam_beta2']),
                 eps=config['adam_eps'],
@@ -277,7 +285,7 @@ class PuffeRL:
                     state['lstm_h'] = self.lstm_h[env_id.start]
                     state['lstm_c'] = self.lstm_c[env_id.start]
 
-                if config['lsd']:
+                if config['metra']:
                     skill_st = env_id.start // self.agents_per_skill
                     skill_end = env_id.stop // self.agents_per_skill
                     skills = self.skills[skill_st:skill_end]
@@ -358,7 +366,7 @@ class PuffeRL:
         anneal_beta = b0 + (1 - b0)*a*self.epoch/self.total_epochs
         self.ratio[:] = 1
 
-        if config['lsd']: 
+        if config['metra']: 
             with torch.no_grad():
                 # Compute discrim sur les mb_obs_latent (mb_segs, bptt, skill_dim) 
 
@@ -403,8 +411,8 @@ class PuffeRL:
                 ).reshape(*latent_diff.shape[:-1], -1)
 
                 # compute dot product on last dim to get (mb_segs, bptt, 1)
-                r_lsd = (latent_diff * skills).sum(dim=-1)
-                r_lsd = torch.clamp(r_lsd, -1, 1)
+                r_metra = (latent_diff * skills).sum(dim=-1)
+                r_metra = torch.clamp(r_metra, -1, 1)
                 cosing_align = torch.nn.functional.cosine_similarity(
                     latent_diff, 
                     skills, 
@@ -412,7 +420,7 @@ class PuffeRL:
                 )
 
                 # Overwrite rewards with this
-                self.rewards = r_lsd.detach()
+                self.rewards = r_metra.detach()# 0.3*self.rewards + 0.7*r_metra.detach()
 
         for mb in range(self.total_minibatches):
             profile('train_misc', epoch, nest=True)
@@ -428,7 +436,7 @@ class PuffeRL:
             adv = advantages.abs().sum(axis=1)
             prio_weights = torch.nan_to_num(adv**a, 0, 0, 0)
             prio_probs = (prio_weights + 1e-6)/(prio_weights.sum() + 1e-6)
-            if config['lsd']:
+            if config['metra']:
                 # test
                 prio_probs = torch.ones_like(prio_probs)/len(prio_probs)
             
@@ -444,7 +452,7 @@ class PuffeRL:
             mb_values = self.values[idx]
             mb_returns = advantages[idx] + mb_values
             mb_advantages = advantages[idx]
-            if config['lsd']:
+            if config['metra']:
                 mb_latent_diff = latent_diff[idx]
                 mb_skills = skills[idx]
             
@@ -458,10 +466,8 @@ class PuffeRL:
                 lstm_c=None,
             )
 
-            if config['lsd']: 
-                # TODO put correct skills
-                # skills = self.skills.repeat_interleave(self.minibatch_size // self.skills.shape[0], dim=0)
-                state['skills'] = mb_skills.reshape(-1, config['lsd_skill_dim'])
+            if config['metra']: 
+                state['skills'] = mb_skills.reshape(-1, config['metra_skill_dim'])
 
             logits, newvalue = self.policy(mb_obs, state)
             actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
@@ -499,25 +505,22 @@ class PuffeRL:
                 
             loss = pg_loss + config['vf_coef']*v_loss - config['ent_coef']*entropy_loss
 
-            if config['lsd']:
-                # We need this again to not double backprop through discriminator
-                # Compute discrim sur les mb_obs_latent (mb_segs, bptt, skill_dim)
+            if config['metra']:
+                # We need this again to not double backprop through phi
+                # Compute phi sur les mb_obs_latent (mb_segs, bptt, skill_dim)
                 phi_state = dict(
                     lstm_h=None,
                     lstm_c=None,
                 ) 
                 if config['use_rnn']:
-                    mb_obs_latent = self.policy.policy.phi_forward(
-                        # mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape),
-                        mb_obs,
-                        phi_state
-                    )
+                    metra_pol = self.policy.policy
                 else: 
-                    mb_obs_latent = self.policy.phi_forward(
-                        # mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape),
-                        mb_obs,
-                        phi_state
-                    )
+                    metra_pol = self.policy
+                
+                mb_obs_latent = metra_pol.phi_forward(
+                    mb_obs,
+                    phi_state
+                )
                 mb_obs_latent = mb_obs_latent.reshape(*mb_obs.shape[:-1], -1)
 
                 # Get the diff on mb_obs_latent to get \phi(s_{t+1})-\phi(s_t) (mb_segs, bptt-1, skill_dim)
@@ -529,9 +532,16 @@ class PuffeRL:
                 valid_mask = (mb_terminals == 0) & (mb_truncations == 0)
                 mb_latent_diff[~valid_mask] = 0
                 
-                # LSD loss is basically r_lsd on the minibatch? 
-                lsd_loss = -(mb_latent_diff * mb_skills).sum(axis=-1).mean()
-                loss += lsd_loss
+                # metra loss is basically r_metra on the minibatch? 
+                metra_loss = -(mb_latent_diff * mb_skills).sum(axis=-1).mean()
+
+                constraint_penalty = torch.clamp(1.0 - mb_latent_diff.norm(dim=-1)**2, min=1e-3)
+                constraint_penalty = constraint_penalty.mean()
+                metra_loss += metra_pol.lambda_param.detach() * constraint_penalty 
+                loss += metra_loss
+
+                lagrange_loss = metra_pol.lambda_param * constraint_penalty.detach()
+                lagrange_loss.backward()
 
             self.amp_context.__enter__() # TODO: AMP needs some debugging
 
@@ -547,8 +557,10 @@ class PuffeRL:
             losses['approx_kl'] += approx_kl.item() / self.total_minibatches
             losses['clipfrac'] += clipfrac.item() / self.total_minibatches
             losses['importance'] += ratio.mean().item() / self.total_minibatches
-            if config['lsd']:
-                losses['lsd_loss'] += lsd_loss.item() / self.total_minibatches
+            if config['metra']:
+                losses['metra_loss'] += metra_loss.item() / self.total_minibatches
+                losses['lagrange_loss'] += lagrange_loss.item() / self.total_minibatches
+                losses['lagrange_mult'] += metra_pol.lambda_param.item() / self.total_minibatches
 
             # Learn on accumulated minibatches
             profile('learn', epoch)
@@ -557,6 +569,10 @@ class PuffeRL:
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), config['max_grad_norm'])
                 self.optimizer.step()
                 self.optimizer.zero_grad()
+
+                if config['metra']: 
+                    metra_pol.lambda_optim.step()
+                    metra_pol.lambda_optim.zero_grad()
 
         # Reprioritize experience
         profile('train_misc', epoch)
@@ -569,39 +585,40 @@ class PuffeRL:
         explained_var = torch.nan if var_y == 0 else 1 - (y_true - y_pred).var() / var_y
         losses['explained_variance'] = explained_var.item()
 
-        if config['lsd']:
-            losses['r_lsd'] = r_lsd.mean().item()
+        if config['metra']:
+            losses['r_metra'] = r_metra.mean().item()
             losses['cosine_align'] = cosing_align.mean().item()
             losses['phi_norm'] = torch.linalg.vector_norm(latent_diff, dim=-1).mean().item()
             # Compute average spectral norm
             if config['use_rnn']:
-                pol = self.policy.policy
+                metra_pol = self.policy.policy
             else:
-                pol = self.policy
+                metra_pol = self.policy
 
             n_modules = 0 
-            for module in pol.phi:
+            for module in metra_pol.phi:
                 if isinstance(module, torch.nn.Linear):
                     n_modules += 1
                     sigma = torch.linalg.matrix_norm(module.weight, 2).item()
                     losses['spectral_norm'] += sigma
-            for module in pol.phi_output:
-                if isinstance(module, torch.nn.Linear):
-                    n_modules += 1
-                    sigma = torch.linalg.matrix_norm(module.weight, 2).item()
-                    losses['spectral_norm'] += sigma
+            # for module in metra_pol.phi_output:
+            #     if isinstance(module, torch.nn.Linear):
+            #         n_modules += 1
+            #         sigma = torch.linalg.matrix_norm(module.weight, 2).item()
+            #         losses['spectral_norm'] += sigma
 
             losses['spectral_norm'] /= n_modules
 
-            # self.skills = torch.rand(size=(config['lsd_population_size'], config['lsd_skill_dim']), device=device) # TODO: other skill init? read LSD
-            # self.skills -= self.skills.mean(dim=1, keepdim=True) # 0 mean, as in the paper
 
-            # N, D = config['lsd_population_size'], config['lsd_skill_dim']
-            # self.skills = torch.full(size=(N, D), fill_value=-1/(D-1), device=device)
-            # idx = torch.randint(0, D, size=(N,), device=device)
-            # idx = torch.arange(N, device=device)
-            # self.skills[torch.arange(N, device=device), idx] = 1
-            
+            N, D = config['metra_population_size'], config['metra_skill_dim']
+            if config['metra_continuous']:
+                self.skills = torch.randn(size=(N, D), device=device)
+                self.skills /= torch.linalg.vector_norm(self.skills, dim=-1, keepdim=True) + 1e-8
+            else:
+                self.skills = torch.full(size=(N, D), fill_value=-1/(D-1), device=device)
+                idx = torch.arange(N, device=device)
+                self.skills[torch.arange(N, device=device), idx] = 1
+        
         profile.end()
         logs = None
         self.epoch += 1
@@ -692,7 +709,7 @@ class PuffeRL:
             'model_name': model_name,
             'run_id': run_id,
         }
-        if self.config['lsd']:
+        if self.config['metra']:
             state['skills'] = self.skills.cpu().numpy()
 
         state_path = os.path.join(path, 'trainer_state.pt')
@@ -1130,7 +1147,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
         )
 
-    if args['train']['lsd']:
+    if args['train']['metra']:
         skills = load_skills(args, vecenv)
         num_agents_per_env = args['env'].get('num_agents',1)
         # breakpoint()
@@ -1148,8 +1165,10 @@ def eval(env_name, args=None, vecenv=None, policy=None):
     
         # Replace with this to get only a single genome
         # breakpoint()
-        # state['skills'] = skills[2].expand(ob.shape[0], -1)
+        # state['skills'] = skills[0].expand(ob.shape[0], -1)
 
+    # render = driver.render()
+    # breakpoint()
 
     frames = []
     while True:

@@ -1019,7 +1019,7 @@ class Drone(nn.Module):
         values = self.value(hidden)
         return logits, values
 
-class LSD(nn.Module):
+class METRA(nn.Module):
     def __init__(self, env, hidden_size=128, skill_dim=4):
         super().__init__()
         self.hidden_size = hidden_size
@@ -1066,7 +1066,7 @@ class LSD(nn.Module):
         self.value = pufferlib.pytorch.layer_init(
             nn.Linear(hidden_size, 1), std=1)
         
-        # self.discriminator = nn.Sequential(
+        # self.phi = nn.Sequential(
         #     nn.utils.parametrizations.spectral_norm(
         #         nn.Linear(self.input_size - skill_dim, hidden_size),
         #         n_power_iterations=1
@@ -1082,46 +1082,68 @@ class LSD(nn.Module):
         #         n_power_iterations=1
         #     ),
         # )
-
+        
         self.phi = nn.Sequential(
-            # Input FFN with spectral normalization
-            nn.utils.parametrizations.spectral_norm(
-                nn.Linear(self.input_size - skill_dim, hidden_size),
-                n_power_iterations=1
-            ),
+            nn.Linear(self.input_size - skill_dim, hidden_size),
             nn.GELU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(self.hidden_size, skill_dim),
         )
 
-        # LSTM layer
-        self.phi_lstm = nn.LSTM(
-            input_size=hidden_size,
-            hidden_size=hidden_size,
-            num_layers=1,
-            batch_first=True
-        )
+        self.log_lambda = nn.Parameter(torch.log(torch.tensor(30.0)))
+        self.lambda_optim = torch.optim.Adam([self.log_lambda], lr=1e-3)
 
-        # Output FFN with spectral normalization
-        self.phi_output = nn.Sequential(
-            nn.utils.parametrizations.spectral_norm(
-                nn.Linear(hidden_size, hidden_size),
-                n_power_iterations=1
-            ),
-            nn.GELU(),
-            nn.utils.parametrizations.spectral_norm(
-                nn.Linear(hidden_size, skill_dim),
-                n_power_iterations=1
-            ),
-        )
+        # self.phi = nn.Sequential(
+        #     # Input FFN with spectral normalization
+        #     nn.utils.parametrizations.spectral_norm(
+        #         nn.Linear(self.input_size - skill_dim, hidden_size),
+        #         n_power_iterations=1
+        #     ),
+        #     nn.GELU(),
+        # )
+
+        # # LSTM layer
+        # self.phi_lstm = nn.LSTM(
+        #     input_size=hidden_size,
+        #     hidden_size=hidden_size,
+        #     num_layers=1,
+        #     batch_first=True
+        # )
+
+        # # Output FFN with spectral normalization
+        # self.phi_output = nn.Sequential(
+        #     nn.utils.parametrizations.spectral_norm(
+        #         nn.Linear(hidden_size, hidden_size),
+        #         n_power_iterations=1
+        #     ),
+        #     nn.GELU(),
+        #     nn.utils.parametrizations.spectral_norm(
+        #         nn.Linear(hidden_size, skill_dim),
+        #         n_power_iterations=1
+        #     ),
+        # )
+
+    @property 
+    def lambda_param(self):
+        return torch.exp(self.log_lambda)
         
     def phi_forward(self, observations, state=None):
-        # batch_size = observations.shape[0]
-        # if self.is_dict_obs:
-        #     observations = pufferlib.pytorch.nativize_tensor(observations, self.dtype)
-        #     observations = torch.cat([v.view(batch_size, -1) for v in observations.values()], dim=1)
-        # else: 
-        #     observations = observations.view(batch_size, -1)
-        # return self.discriminator(observations.float())
 
+        x = observations
+        x_shape, space_shape = x.shape, self.obs_shape
+        x_n, space_n = len(x_shape), len(space_shape)
+        if x_n == space_n + 1:
+            B, TT = x_shape[0], 1
+        elif x_n == space_n + 2:
+            B, TT = x_shape[:2]
+        else:
+            raise ValueError('Invalid input tensor shape', x.shape)
+        x = x.reshape(B*TT, *space_shape)
+
+        return self.phi(x.float())
+
+        # LSTM stuff
         x = observations
         lstm_h = state['lstm_h']
         lstm_c = state['lstm_c']
