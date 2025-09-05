@@ -1088,7 +1088,7 @@ class METRA(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_size, hidden_size),
             nn.GELU(),
-            nn.Linear(self.hidden_size, skill_dim),
+            # nn.Linear(self.hidden_size, skill_dim),
         )
 
         self.log_lambda = nn.Parameter(torch.log(torch.tensor(30.0)))
@@ -1103,26 +1103,26 @@ class METRA(nn.Module):
         #     nn.GELU(),
         # )
 
-        # # LSTM layer
-        # self.phi_lstm = nn.LSTM(
-        #     input_size=hidden_size,
-        #     hidden_size=hidden_size,
-        #     num_layers=1,
-        #     batch_first=True
-        # )
+        # LSTM layer
+        self.phi_lstm = nn.LSTM(
+            input_size=hidden_size,
+            hidden_size=hidden_size,
+            num_layers=1,
+            batch_first=True
+        )
 
-        # # Output FFN with spectral normalization
-        # self.phi_output = nn.Sequential(
-        #     nn.utils.parametrizations.spectral_norm(
-        #         nn.Linear(hidden_size, hidden_size),
-        #         n_power_iterations=1
-        #     ),
-        #     nn.GELU(),
-        #     nn.utils.parametrizations.spectral_norm(
-        #         nn.Linear(hidden_size, skill_dim),
-        #         n_power_iterations=1
-        #     ),
-        # )
+        # Output FFN with spectral normalization
+        self.phi_output = nn.Sequential(
+            nn.utils.parametrizations.spectral_norm(
+                nn.Linear(hidden_size, hidden_size),
+                n_power_iterations=1
+            ),
+            nn.GELU(),
+            nn.utils.parametrizations.spectral_norm(
+                nn.Linear(hidden_size, skill_dim),
+                n_power_iterations=1
+            ),
+        )
 
     @property 
     def lambda_param(self):
@@ -1130,18 +1130,18 @@ class METRA(nn.Module):
         
     def phi_forward(self, observations, state=None):
 
-        x = observations
-        x_shape, space_shape = x.shape, self.obs_shape
-        x_n, space_n = len(x_shape), len(space_shape)
-        if x_n == space_n + 1:
-            B, TT = x_shape[0], 1
-        elif x_n == space_n + 2:
-            B, TT = x_shape[:2]
-        else:
-            raise ValueError('Invalid input tensor shape', x.shape)
-        x = x.reshape(B*TT, *space_shape)
+        # x = observations
+        # x_shape, space_shape = x.shape, self.obs_shape
+        # x_n, space_n = len(x_shape), len(space_shape)
+        # if x_n == space_n + 1:
+        #     B, TT = x_shape[0], 1
+        # elif x_n == space_n + 2:
+        #     B, TT = x_shape[:2]
+        # else:
+        #     raise ValueError('Invalid input tensor shape', x.shape)
+        # x = x.reshape(B*TT, *space_shape)
 
-        return self.phi(x.float())
+        # return self.phi(x.float())
 
         # LSTM stuff
         x = observations
@@ -1167,7 +1167,7 @@ class METRA(nn.Module):
             lstm_state = None
 
         x = x.reshape(B*TT, *space_shape)
-        hidden = self.phi(x)
+        hidden = self.phi(x.float())
         assert hidden.shape == (B*TT, self.hidden_size)
 
         hidden = hidden.reshape(B, TT, self.hidden_size)
