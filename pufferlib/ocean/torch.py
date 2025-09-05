@@ -1020,12 +1020,13 @@ class Drone(nn.Module):
         return logits, values
 
 class METRA(nn.Module):
-    def __init__(self, env, hidden_size=128, skill_dim=4):
+    def __init__(self, env, hidden_size=128, skill_dim=4, frame_skip=1):
         super().__init__()
         self.hidden_size = hidden_size
         self.input_size = skill_dim
         self.obs_shape = env.single_observation_space.shape
         self.skill_dim = skill_dim
+        self.frame_skip = frame_skip
 
         self.is_multidiscrete = isinstance(env.single_action_space,
                 pufferlib.spaces.MultiDiscrete)
@@ -1065,58 +1066,33 @@ class METRA(nn.Module):
 
         self.value = pufferlib.pytorch.layer_init(
             nn.Linear(hidden_size, 1), std=1)
-        
-        # self.phi = nn.Sequential(
-        #     nn.utils.parametrizations.spectral_norm(
-        #         nn.Linear(self.input_size - skill_dim, hidden_size),
-        #         n_power_iterations=1
-        #     ),
-        #     nn.GELU(),
-        #     nn.utils.parametrizations.spectral_norm(
-        #         nn.Linear(hidden_size, hidden_size),
-        #         n_power_iterations=1
-        #     ),
-        #     nn.GELU(),
-        #     nn.utils.parametrizations.spectral_norm(
-        #         nn.Linear(self.hidden_size, skill_dim),
-        #         n_power_iterations=1
-        #     ),
-        # )
-        
+                
+        self.phi_in = self.frame_skip * (self.input_size - skill_dim)
         self.phi = nn.Sequential(
-            nn.Linear(self.input_size - skill_dim, hidden_size),
+            nn.Linear(self.phi_in, hidden_size*self.frame_skip),
             nn.GELU(),
-            nn.Linear(hidden_size, hidden_size),
+            nn.Linear(hidden_size*self.frame_skip, hidden_size*self.frame_skip),
             nn.GELU(),
-            # nn.Linear(self.hidden_size, skill_dim),
+            nn.Linear(self.hidden_size*self.frame_skip, skill_dim),
         )
 
         self.log_lambda = nn.Parameter(torch.log(torch.tensor(30.0)))
         self.lambda_optim = torch.optim.Adam([self.log_lambda], lr=1e-3)
 
-        # self.phi = nn.Sequential(
-        #     # Input FFN with spectral normalization
-        #     nn.utils.parametrizations.spectral_norm(
-        #         nn.Linear(self.input_size - skill_dim, hidden_size),
-        #         n_power_iterations=1
-        #     ),
-        #     nn.GELU(),
+        # # LSTM layer
+        # self.phi_lstm = nn.LSTM(
+        #     input_size=hidden_size,
+        #     hidden_size=hidden_size,
+        #     num_layers=1,
+        #     batch_first=True
         # )
 
-        # LSTM layer
-        self.phi_lstm = nn.LSTM(
-            input_size=hidden_size,
-            hidden_size=hidden_size,
-            num_layers=1,
-            batch_first=True
-        )
-
-        # Output FFN with spectral normalization
-        self.phi_output = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.GELU(),
-            nn.Linear(hidden_size, skill_dim),
-        )
+        # # Output FFN 
+        # self.phi_output = nn.Sequential(
+        #     nn.Linear(hidden_size, hidden_size),
+        #     nn.GELU(),
+        #     nn.Linear(hidden_size, skill_dim),
+        # )
 
     @property 
     def lambda_param(self):
@@ -1124,18 +1100,17 @@ class METRA(nn.Module):
         
     def phi_forward(self, observations, state=None):
 
-        # x = observations
-        # x_shape, space_shape = x.shape, self.obs_shape
-        # x_n, space_n = len(x_shape), len(space_shape)
-        # if x_n == space_n + 1:
-        #     B, TT = x_shape[0], 1
-        # elif x_n == space_n + 2:
-        #     B, TT = x_shape[:2]
-        # else:
-        #     raise ValueError('Invalid input tensor shape', x.shape)
-        # x = x.reshape(B*TT, *space_shape)
-
-        # return self.phi(x.float())
+        x = observations
+        x_shape, space_shape = x.shape, self.obs_shape
+        x_n, space_n = len(x_shape), len(space_shape)
+        if x_n == space_n + 1:
+            B, TT = x_shape[0], 1
+        elif x_n == space_n + 2:
+            B, TT = x_shape[:2]
+        else:
+            raise ValueError('Invalid input tensor shape', x.shape)
+        x = x.reshape(B*TT, -1)
+        return self.phi(x.float())
 
         # LSTM stuff
         x = observations
