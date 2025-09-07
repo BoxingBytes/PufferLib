@@ -1,3 +1,11 @@
+# Evolutionary Policy Optimization
+
+This is an implementation of the [Evolutionary Policy Optimization](https://arxiv.org/abs/2503.19037) paper using pufferlib. 
+
+
+
+
+
 ![figure](https://pufferai.github.io/source/resource/header.png)
 
 [![PyPI version](https://badge.fury.io/py/pufferlib.svg)](https://badge.fury.io/py/pufferlib)
