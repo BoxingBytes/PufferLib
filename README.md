@@ -2,7 +2,17 @@
 
 This is an implementation of the [Evolutionary Policy Optimization](https://arxiv.org/abs/2503.19037) paper using pufferlib. 
 
+To use, git clone & pip install in editable mode: 
+```bash
+pip install -e .
+```
 
+Make sure epo is enabled in conf ```config/default.ini```, then 
+```
+puffer train puffer_convert_circle
+```
+
+The main code is implemented in the ```pufferlib/pufferl.py```file. Look for **use_epo** flags.
 
 
 
