@@ -1020,13 +1020,12 @@ class Drone(nn.Module):
         return logits, values
 
 class METRA(nn.Module):
-    def __init__(self, env, hidden_size=128, skill_dim=4, frame_skip=1):
+    def __init__(self, env, hidden_size=128, skill_dim=4):
         super().__init__()
         self.hidden_size = hidden_size
         self.input_size = skill_dim
         self.obs_shape = env.single_observation_space.shape
         self.skill_dim = skill_dim
-        self.frame_skip = frame_skip
 
         self.is_multidiscrete = isinstance(env.single_action_space,
                 pufferlib.spaces.MultiDiscrete)
@@ -1067,13 +1066,13 @@ class METRA(nn.Module):
         self.value = pufferlib.pytorch.layer_init(
             nn.Linear(hidden_size, 1), std=1)
                 
-        self.phi_in = self.frame_skip * (self.input_size - skill_dim)
+        self.phi_in = (self.input_size - skill_dim)
         self.phi = nn.Sequential(
-            nn.Linear(self.phi_in, hidden_size*self.frame_skip),
+            nn.Linear(self.phi_in, hidden_size),
             nn.GELU(),
-            nn.Linear(hidden_size*self.frame_skip, hidden_size*self.frame_skip),
+            nn.Linear(hidden_size, hidden_size),
             nn.GELU(),
-            nn.Linear(self.hidden_size*self.frame_skip, skill_dim),
+            nn.Linear(self.hidden_size, skill_dim),
         )
 
         self.log_lambda = nn.Parameter(torch.log(torch.tensor(30.0)))

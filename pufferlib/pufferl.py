@@ -366,21 +366,9 @@ class PuffeRL:
         self.ratio[:] = 1
 
         if config['metra']:
-            frame_skip = config.get('frame_skip', 1)
-            if frame_skip != 1:
-                B, TT, env_space = self.observations.shape
-                first_tt = self.observations[:,[0]] # (B, 1, env_space)
-                pad_tt = first_tt.repeat(1, frame_skip-1, 1) # (B, frame_skip-1, env_space)
-                padded = torch.cat([pad_tt, self.observations], dim=1) # (B, TT+frame_skip-1, env_space)
-
-                # Rollout to get sliding window 
-                windows = padded.unfold(1, frame_skip, 1) # (B, TT, env_space, frame_skip)
-
-                stacked_obs = windows.reshape(B, TT, env_space*frame_skip)
 
             with torch.no_grad():
                 # Compute discrim sur les mb_obs_latent (mb_segs, bptt, skill_dim) 
-
                 # Workaround huge batch sizes bug in cuda > 65k
                 obs_latent_chunk = []
                 B = self.observations.shape[0]
@@ -390,11 +378,8 @@ class PuffeRL:
                         lstm_h=None,
                         lstm_c=None,
                     )
-                    if frame_skip == 1:
-                        obs_chunk = self.observations[i:i+max_chunk]
-                    else: 
-                        obs_chunk = stacked_obs[i:i+max_chunk]
-                    
+                    obs_chunk = self.observations[i:i+max_chunk]
+
                     if config['use_rnn']:
                         latent_chunk = self.policy.policy.phi_forward(
                             obs_chunk,
@@ -531,9 +516,6 @@ class PuffeRL:
                     metra_pol = self.policy.policy
                 else: 
                     metra_pol = self.policy
-                
-                if frame_skip != 1:
-                    mb_obs = stacked_obs[idx]
 
                 mb_obs_latent = metra_pol.phi_forward(
                     mb_obs,
@@ -1108,7 +1090,8 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     elif args['wandb']:
         logger = WandbLogger(args)
 
-    train_config = dict(**args['train'], env=env_name)
+    env_conf = args['env']
+    train_config = dict(**args['train'], env=env_name, env_conf=env_conf)
     pufferl = PuffeRL(train_config, vecenv, policy, logger)
 
     all_logs = []
@@ -1312,7 +1295,6 @@ def load_policy(args, vecenv, env_name=''):
     params = args['policy']
     if args['train']['metra']:
         params['skill_dim'] = args['train']['metra_skill_dim']
-        params['frame_skip'] = args['train'].get('frame_skip', 1)
 
     policy = policy_cls(vecenv.driver_env, **params)
 
