@@ -51,7 +51,6 @@ ADVANTAGE_CUDA = shutil.which("nvcc") is not None
 
 class PuffeRL:
     def __init__(self, config, vecenv, policy, logger=None):
-
         # Backend perf optimization
         torch.set_float32_matmul_precision('high')
         torch.backends.cudnn.deterministic = config['torch_deterministic']
@@ -518,7 +517,7 @@ class PuffeRL:
             v_loss = 0.5*torch.max(v_loss_unclipped, v_loss_clipped).mean()
 
             entropy_loss = entropy.mean()
-                
+
             loss = pg_loss + config['vf_coef']*v_loss - config['ent_coef']*entropy_loss
 
             if config['metra']:
@@ -1109,8 +1108,7 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     elif args['wandb']:
         logger = WandbLogger(args)
 
-    env_conf = args['env']
-    train_config = dict(**args['train'], env=env_name, env_conf=env_conf)
+    train_config = dict(**args['train'], env=env_name)
     pufferl = PuffeRL(train_config, vecenv, policy, logger)
 
     all_logs = []
