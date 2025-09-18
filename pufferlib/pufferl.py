@@ -415,6 +415,8 @@ class PuffeRL:
                 r_metra = torch.zeros((B,TT,1), device=device)
                 latent_diff = (obs_latent[:,-1,:] - obs_latent[:,0,:])
                 r_metra[:,-1,:] = (latent_diff * skills[:, -1, :]).sum(dim=-1, keepdim=True)
+                # Because now we violate lipschitz TD constraint
+                r_metra = r_metra/TT
                 r_metra = torch.clamp(r_metra.squeeze(), -1, 1)
                 valid_mask = (self.terminals == 0) & (self.truncations == 0)
                 r_metra[~valid_mask] = 0
@@ -541,6 +543,8 @@ class PuffeRL:
                 metra_loss = torch.zeros((mb,tt,1), device=device)
                 mb_latent_diff = (mb_obs_latent[:,-1,:] - mb_obs_latent[:,0,:])
                 metra_loss[:,-1,:] = - (mb_latent_diff * mb_skills[:, -1, :]).sum(dim=-1, keepdim=True)
+                # Because now we violate lipschitz TD constraint
+                metra_loss = metra_loss/tt                
                 metra_loss = torch.clamp(metra_loss.squeeze(), -1, 1)
                 valid_mask = (mb_terminals == 0) & (mb_truncations == 0)
                 metra_loss[~valid_mask] = 0
