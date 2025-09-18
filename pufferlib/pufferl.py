@@ -371,7 +371,7 @@ class PuffeRL:
                 # Compute discrim sur les mb_obs_latent (mb_segs, bptt, skill_dim) 
                 # Workaround huge batch sizes bug in cuda > 65k
                 obs_latent_chunk = []
-                B = self.observations.shape[0]
+                B, TT = self.observations.shape[0], self.observations.shape[1]
                 max_chunk = 2048
                 for i in range(0, B, max_chunk):
                     phi_state = dict(
@@ -397,27 +397,36 @@ class PuffeRL:
 
                 # Get the diff on mb_obs_latent to get \phi(s_{t+1})-\phi(s_t) (mb_segs, bptt-1, skill_dim)
                 # Add the last one to 0, so we get the correct shape (mb_segs, bptt, skill_dim)
-                latent_diff = torch.zeros(obs_latent.shape, device=device)
-                latent_diff[:,:-1,:] = torch.diff(obs_latent, dim=-2)
+                # latent_diff = torch.zeros(obs_latent.shape, device=device)
+                # latent_diff[:,:-1,:] = torch.diff(obs_latent, dim=-2)
 
                 # Add logic if terminal or truncation
-                valid_mask = (self.terminals == 0) & (self.truncations == 0)
-                latent_diff[~valid_mask] = 0
+                # valid_mask = (self.terminals == 0) & (self.truncations == 0)
+                # latent_diff[~valid_mask] = 0
 
                 # Get the skills for each segment, and repeat to get shape (mb_segs, bptt, skill_dim)
                 skill_idx = torch.arange(end=self.segments) // self.agents_per_skill
                 skills = self.skills[skill_idx].repeat_interleave(
-                    latent_diff.shape[1], dim=0
-                ).reshape(*latent_diff.shape[:-1], -1)
+                    TT, dim=0
+                ).reshape(B, TT, -1)
 
-                # compute dot product on last dim to get (mb_segs, bptt, 1)
-                r_metra = (latent_diff * skills).sum(dim=-1)
-                r_metra = torch.clamp(r_metra, -1, 1)
-                cosing_align = torch.nn.functional.cosine_similarity(
-                    latent_diff, 
-                    skills, 
-                    dim=-1,
-                )
+                # R metra is just on the final TT and is the diff in latent space between s_T and s_0,
+                # Dot product with z
+                r_metra = torch.zeros((B,TT,1), device=device)
+                latent_diff = (obs_latent[:,-1,:] - obs_latent[:,0,:])
+                r_metra[:,-1,:] = (latent_diff * skills[:, -1, :]).sum(dim=-1, keepdim=True)
+                r_metra = torch.clamp(r_metra.squeeze(), -1, 1)
+                valid_mask = (self.terminals == 0) & (self.truncations == 0)
+                r_metra[~valid_mask] = 0
+
+                # compute dot product on last dim to get (mb_segs, bptt, 1)                
+                # r_metra = (latent_diff * skills).sum(dim=-1)
+                # r_metra = torch.clamp(r_metra, -1, 1)
+                # cosing_align = torch.nn.functional.cosine_similarity(
+                #     latent_diff, 
+                #     skills, 
+                #     dim=-1,
+                # )
 
                 # Overwrite rewards with this
                 self.rewards = r_metra.detach()# 0.3*self.rewards + 0.7*r_metra.detach()
@@ -525,15 +534,24 @@ class PuffeRL:
 
                 # Get the diff on mb_obs_latent to get \phi(s_{t+1})-\phi(s_t) (mb_segs, bptt-1, skill_dim)
                 # Add the last one to 0, so we get the correct shape (mb_segs, bptt, skill_dim)
-                mb_latent_diff = torch.zeros(mb_obs_latent.shape, device=device)
-                mb_latent_diff[:,:-1,:] = torch.diff(mb_obs_latent, dim=-2)
+                # mb_latent_diff = torch.zeros(mb_obs_latent.shape, device=device)
+                # mb_latent_diff[:,:-1,:] = torch.diff(mb_obs_latent, dim=-2)
+
+                mb, tt = mb_obs_latent.shape[0], mb_obs_latent.shape[1]
+                metra_loss = torch.zeros((mb,tt,1), device=device)
+                mb_latent_diff = (mb_obs_latent[:,-1,:] - mb_obs_latent[:,0,:])
+                metra_loss[:,-1,:] = - (mb_latent_diff * mb_skills[:, -1, :]).sum(dim=-1, keepdim=True)
+                metra_loss = torch.clamp(metra_loss.squeeze(), -1, 1)
+                valid_mask = (mb_terminals == 0) & (mb_truncations == 0)
+                metra_loss[~valid_mask] = 0
+                metra_loss = metra_loss.mean()
 
                 # Add logic if terminal or truncation
-                valid_mask = (mb_terminals == 0) & (mb_truncations == 0)
-                mb_latent_diff[~valid_mask] = 0
+                # valid_mask = (mb_terminals == 0) & (mb_truncations == 0)
+                # mb_latent_diff[~valid_mask] = 0
                 
                 # metra loss is basically r_metra on the minibatch? 
-                metra_loss = -(mb_latent_diff * mb_skills).sum(axis=-1).mean()
+                # metra_loss = -(mb_latent_diff * mb_skills).sum(axis=-1).mean()
 
                 constraint_penalty = torch.clamp(1.0 - mb_latent_diff.norm(dim=-1)**2, min=1e-3)
                 constraint_penalty = constraint_penalty.mean()
@@ -587,7 +605,7 @@ class PuffeRL:
 
         if config['metra']:
             losses['r_metra'] = r_metra.mean().item()
-            losses['cosine_align'] = cosing_align.mean().item()
+            # losses['cosine_align'] = cosing_align.mean().item()
             losses['phi_norm'] = torch.linalg.vector_norm(latent_diff, dim=-1).mean().item()
             # Compute average spectral norm
             if config['use_rnn']:
@@ -1149,7 +1167,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
 
     if args['train']['metra']:
         skills = load_skills(args, vecenv)
-        num_agents_per_env = args['env'].get('num_agents',1)
+        num_agents_per_env = args['env'].get('num_agents', 1)
         if num_agents_per_env >= len(skills): 
             # We have enough agents to split skills in one env
             agents_per_skill = num_agents_per_env // len(skills)
@@ -1164,12 +1182,20 @@ def eval(env_name, args=None, vecenv=None, policy=None):
     
         # Replace with this to get only a single genome
         # breakpoint()
-        state['skills'] = skills[1].expand(ob.shape[0], -1)
+        # state['skills'] = skills[0].expand(ob.shape[0], -1)
 
     # render = driver.render()
     # breakpoint()
 
+    # Metra visualization
+    # n = 512
+    # i = 0
+    # s = torch.zeros((n, num_agents, ob.shape[-1]), device=device) 
+    # phis = torch.zeros((n, num_agents, state['skills'].shape[-1]), device=device)
+
+
     frames = []
+    # while i < n:
     while True:
         render = driver.render()
         if len(frames) < args['save_frames']:
@@ -1193,6 +1219,11 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
             action = action.cpu().numpy().reshape(vecenv.action_space.shape)
 
+            # s[i, :, :] = ob
+            # phi_ob = policy.policy.phi_forward(ob, state)
+            # phis[i, :, :] = phi_ob
+            # i += 1
+
         if isinstance(logits, torch.distributions.Normal):
             action = np.clip(action, vecenv.action_space.low, vecenv.action_space.high)
 
@@ -1202,6 +1233,78 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             import imageio
             imageio.mimsave(args['gif_path'], frames, fps=args['fps'], loop=0)
             frames.append('Done')
+
+    return
+
+    from sklearn.manifold import TSNE
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.model_selection import train_test_split
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.metrics import classification_report
+    import matplotlib.pyplot as plt
+
+    s = s.mean(axis=0)
+    phis = phis.mean(axis=0)
+
+    X = s.reshape(-1, ob.shape[-1]).cpu().numpy()
+    Z = phis.reshape(-1, state['skills'].shape[-1]).cpu().numpy()
+    # y = np.tile(np.arange(len(skills)).repeat(agents_per_skill), n)
+    y = np.arange(len(skills)).repeat(agents_per_skill)
+
+    # idx = np.random.choice(len(X), size=64512, replace=False)
+    # X = X[idx]
+    # y = y[idx]
+    # Z = Z[idx]
+    X_scaled = StandardScaler().fit_transform(X)
+    Z_scaled = StandardScaler().fit_transform(Z)
+
+    # t-SNE visualization
+    # tsne = TSNE(n_components=2, random_state=42, perplexity=30)
+    # X_tsne = tsne.fit_transform(X_scaled)
+
+    import umap
+    reducer = umap.UMAP(n_components=2)
+    X_umap = reducer.fit_transform(X_scaled)
+
+    plt.figure(figsize=(8,6))
+    scatter = plt.scatter(X_umap[:,0], X_umap[:,1], c=y, cmap='tab10', alpha=0.7)
+    plt.legend(*scatter.legend_elements(), title="Skills")
+    plt.title("UMAP of Observations colored by Skill")
+    plt.savefig("umap_skills_avg.png", dpi=300)
+
+    Z_umap = reducer.fit_transform(Z_scaled)
+    plt.figure(figsize=(8,6))
+    scatter = plt.scatter(Z_umap[:,0], Z_umap[:,1], c=y, cmap='tab10', alpha=0.7)
+    plt.legend(*scatter.legend_elements(), title="Skills")
+    plt.title("UMAP of Phi Outputs colored by Skill")
+    plt.savefig("umap_phi_skills_avg.png", dpi=300)
+
+    
+    # Train classifier to predict skill from s
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    clf = RandomForestClassifier(n_estimators=100, random_state=42)
+    clf.fit(X_train, y_train)
+    y_pred = clf.predict(X_test)
+
+    print(classification_report(y_test, y_pred))
+
+    # Correlation
+    # import seaborn as sns
+    # corr_matrix = np.corrcoef(Z.T, X.T)[:phis.shape[-1], phis.shape[-1]:]
+
+    # # Plot heatmap
+    # plt.figure(figsize=(12, 6))
+    # sns.heatmap(corr_matrix, annot=True, fmt=".2f", cmap="coolwarm", cbar=True)
+    # plt.xlabel("Raw Observation Dimensions")
+    # plt.ylabel("Latent Dimensions")
+    # plt.title("Correlation between Latent Dimensions and Raw Observations")
+    # plt.tight_layout()
+
+    # # Save figure
+    # plt.savefig("latent_raw_correlation.png", dpi=300)
+
+    # breakpoint()
 
 def sweep(args=None, env_name=None):
     args = args or load_config(env_name)
