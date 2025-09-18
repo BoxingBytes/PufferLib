@@ -20,8 +20,8 @@
 #define DIR_EAST PI;
 #define DIR_SOUTH 3.0*PI/2.0;
 
-#define EMPTY 0
-#define WALL 1
+#define WALL 0
+#define EMPTY 1
 #define LAVA 2
 #define GOAL 3
 #define REWARD 4
@@ -647,7 +647,7 @@ void generate_growing_tree_maze(unsigned char* grid,
     bool visited[width*height];
     memset(visited, false, width*height);
 
-    memset(grid, WALL, max_size*height);
+    memset(grid, WALL, max_size*max_size);
     for (int r = 0; r < height; r++) {
         for (int c = 0; c < width; c++) {
             int adr = r*max_size + c;
