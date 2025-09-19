@@ -447,9 +447,9 @@ class PuffeRL:
             adv = advantages.abs().sum(axis=1)
             prio_weights = torch.nan_to_num(adv**a, 0, 0, 0)
             prio_probs = (prio_weights + 1e-6)/(prio_weights.sum() + 1e-6)
-            # if config['metra']:
+            if config['metra']:
                 # test
-                # prio_probs = torch.ones_like(prio_probs)/len(prio_probs)
+                prio_probs = torch.ones_like(prio_probs)/len(prio_probs)
             
             idx = torch.multinomial(prio_probs, self.minibatch_segments)
             mb_prio = (self.segments*prio_probs[idx, None])**-anneal_beta
@@ -1186,7 +1186,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
     
         # Replace with this to get only a single genome
         # breakpoint()
-        # state['skills'] = skills[0].expand(ob.shape[0], -1)
+        # state['skills'] = skills[3].expand(ob.shape[0], -1)
 
     # render = driver.render()
     # breakpoint()
@@ -1199,8 +1199,8 @@ def eval(env_name, args=None, vecenv=None, policy=None):
 
 
     frames = []
-    # while i < n:
-    while True:
+    while i < n:
+    # while True:
         render = driver.render()
         if len(frames) < args['save_frames']:
             frames.append(render)
@@ -1223,10 +1223,10 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
             action = action.cpu().numpy().reshape(vecenv.action_space.shape)
 
-            # s[i, :, :] = ob
-            # phi_ob = policy.policy.phi_forward(ob, state)
-            # phis[i, :, :] = phi_ob
-            # i += 1
+            s[i, :, :] = ob
+            phi_ob = policy.policy.phi_forward(ob, state)
+            phis[i, :, :] = phi_ob
+            i += 1
 
         if isinstance(logits, torch.distributions.Normal):
             action = np.clip(action, vecenv.action_space.low, vecenv.action_space.high)
