@@ -611,26 +611,26 @@ class PuffeRL:
         if config['metra']:
             losses['r_metra'] = r_metra.mean().item()
             # losses['cosine_align'] = cosing_align.mean().item()
-            losses['phi_norm'] = torch.linalg.vector_norm(latent_diff, dim=-1).mean().item()
+            # losses['phi_norm'] = torch.linalg.vector_norm(latent_diff, dim=-1).mean().item()
             # Compute average spectral norm
             if config['use_rnn']:
                 metra_pol = self.policy.policy
             else:
                 metra_pol = self.policy
 
-            n_modules = 0 
-            for module in metra_pol.phi:
-                if isinstance(module, torch.nn.Linear):
-                    n_modules += 1
-                    sigma = torch.linalg.matrix_norm(module.weight, 2).item()
-                    losses['spectral_norm'] += sigma
+            # n_modules = 0 
+            # for module in metra_pol.phi:
+            #     if isinstance(module, torch.nn.Linear):
+            #         n_modules += 1
+            #         sigma = torch.linalg.matrix_norm(module.weight, 2).item()
+            #         losses['spectral_norm'] += sigma
             # for module in metra_pol.phi_output:
             #     if isinstance(module, torch.nn.Linear):
             #         n_modules += 1
             #         sigma = torch.linalg.matrix_norm(module.weight, 2).item()
             #         losses['spectral_norm'] += sigma
 
-            losses['spectral_norm'] /= n_modules
+            # losses['spectral_norm'] /= n_modules
 
 
             N, D = config['metra_population_size'], config['metra_skill_dim']
