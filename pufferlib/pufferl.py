@@ -146,7 +146,8 @@ class PuffeRL:
             N, D = pop_size, config['metra_skill_dim']
             if config['metra_continuous']:
                 self.skills = torch.randn(size=(N, D), device=device)
-                self.skills /= torch.linalg.vector_norm(self.skills, dim=-1, keepdim=True) + 1e-8
+                self.skills -= self.skills.mean(dim=-1, keepdim=True)
+                # self.skills /= torch.linalg.vector_norm(self.skills, dim=-1, keepdim=True) + 1e-8
             else:
                 self.skills = torch.full(size=(N, D), fill_value=-1/(D-1), device=device)
                 idx = torch.arange(N, device=device)
@@ -635,7 +636,8 @@ class PuffeRL:
             N, D = config['metra_population_size'], config['metra_skill_dim']
             if config['metra_continuous']:
                 self.skills = torch.randn(size=(N, D), device=device)
-                self.skills /= torch.linalg.vector_norm(self.skills, dim=-1, keepdim=True) + 1e-8
+                self.skills -= self.skills.mean(dim=-1, keepdim=True)
+                # self.skills /= torch.linalg.vector_norm(self.skills, dim=-1, keepdim=True) + 1e-8
             else:
                 self.skills = torch.full(size=(N, D), fill_value=-1/(D-1), device=device)
                 idx = torch.arange(N, device=device)
@@ -1189,7 +1191,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         # state['skills'] = skills[3].expand(ob.shape[0], -1)
 
     # render = driver.render()
-    # breakpoint()
+    breakpoint()
 
     # Metra visualization
     n = 512
