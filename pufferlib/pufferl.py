@@ -447,9 +447,9 @@ class PuffeRL:
             adv = advantages.abs().sum(axis=1)
             prio_weights = torch.nan_to_num(adv**a, 0, 0, 0)
             prio_probs = (prio_weights + 1e-6)/(prio_weights.sum() + 1e-6)
-            if config['metra']:
+            # if config['metra']:
                 # test
-                prio_probs = torch.ones_like(prio_probs)/len(prio_probs)
+                # prio_probs = torch.ones_like(prio_probs)/len(prio_probs)
             
             idx = torch.multinomial(prio_probs, self.minibatch_segments)
             mb_prio = (self.segments*prio_probs[idx, None])**-anneal_beta
@@ -1192,10 +1192,10 @@ def eval(env_name, args=None, vecenv=None, policy=None):
     # breakpoint()
 
     # Metra visualization
-    # n = 512
-    # i = 0
-    # s = torch.zeros((n, num_agents, ob.shape[-1]), device=device) 
-    # phis = torch.zeros((n, num_agents, state['skills'].shape[-1]), device=device)
+    n = 512
+    i = 0
+    s = torch.zeros((n, num_agents, ob.shape[-1]), device=device) 
+    phis = torch.zeros((n, num_agents, state['skills'].shape[-1]), device=device)
 
 
     frames = []
@@ -1238,7 +1238,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             imageio.mimsave(args['gif_path'], frames, fps=args['fps'], loop=0)
             frames.append('Done')
 
-    return
+    # return
 
     from sklearn.manifold import TSNE
     from sklearn.preprocessing import StandardScaler
