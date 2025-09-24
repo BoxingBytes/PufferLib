@@ -558,7 +558,7 @@ class PuffeRL:
                 # metra loss is basically r_metra on the minibatch? 
                 # metra_loss = -(mb_latent_diff * mb_skills).sum(axis=-1).mean()
 
-                constraint_penalty = torch.clamp(1.0 - mb_latent_diff.norm(dim=-1)**2, mmax=1e-3)
+                constraint_penalty = torch.clamp(1.0 - mb_latent_diff.norm(dim=-1)**2, max=1e-3)
                 constraint_penalty = constraint_penalty.mean()
                 metra_loss -= metra_pol.lambda_param.detach() * constraint_penalty 
                 loss += metra_loss
