@@ -1072,27 +1072,27 @@ class METRA(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_size, hidden_size),
             nn.GELU(),
-            # nn.Linear(self.hidden_size, skill_dim),
-            nn.Linear(self.hidden_size, self.hidden_size),
+            nn.Linear(self.hidden_size, skill_dim),
+            # nn.Linear(self.hidden_size, self.hidden_size),
         )
 
         self.log_lambda = nn.Parameter(torch.log(torch.tensor(30.0)))
         self.lambda_optim = torch.optim.Adam([self.log_lambda], lr=1e-3)
 
-        # # LSTM layer
-        self.phi_lstm = nn.LSTM(
-            input_size=hidden_size,
-            hidden_size=hidden_size,
-            num_layers=1,
-            batch_first=True
-        )
+        # # # LSTM layer
+        # self.phi_lstm = nn.LSTM(
+        #     input_size=hidden_size,
+        #     hidden_size=hidden_size,
+        #     num_layers=1,
+        #     batch_first=True
+        # )
 
-        # Output FFN 
-        self.phi_output = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.GELU(),
-            nn.Linear(hidden_size, skill_dim),
-        )
+        # # Output FFN 
+        # self.phi_output = nn.Sequential(
+        #     nn.Linear(hidden_size, hidden_size),
+        #     nn.GELU(),
+        #     nn.Linear(hidden_size, skill_dim),
+        # )
 
     @property 
     def lambda_param(self):
@@ -1100,17 +1100,17 @@ class METRA(nn.Module):
         
     def phi_forward(self, observations, state=None):
 
-        # x = observations
-        # x_shape, space_shape = x.shape, self.obs_shape
-        # x_n, space_n = len(x_shape), len(space_shape)
-        # if x_n == space_n + 1:
-        #     B, TT = x_shape[0], 1
-        # elif x_n == space_n + 2:
-        #     B, TT = x_shape[:2]
-        # else:
-        #     raise ValueError('Invalid input tensor shape', x.shape)
-        # x = x.reshape(B*TT, -1)
-        # return self.phi(x.float())
+        x = observations
+        x_shape, space_shape = x.shape, self.obs_shape
+        x_n, space_n = len(x_shape), len(space_shape)
+        if x_n == space_n + 1:
+            B, TT = x_shape[0], 1
+        elif x_n == space_n + 2:
+            B, TT = x_shape[:2]
+        else:
+            raise ValueError('Invalid input tensor shape', x.shape)
+        x = x.reshape(B*TT, -1)
+        return self.phi(x.float())
 
         # LSTM stuff
         x = observations
