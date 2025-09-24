@@ -558,9 +558,9 @@ class PuffeRL:
                 # metra loss is basically r_metra on the minibatch? 
                 # metra_loss = -(mb_latent_diff * mb_skills).sum(axis=-1).mean()
 
-                constraint_penalty = torch.clamp(1.0 - mb_latent_diff.norm(dim=-1)**2, min=1e-3)
+                constraint_penalty = torch.clamp(1.0 - mb_latent_diff.norm(dim=-1)**2, mmax=1e-3)
                 constraint_penalty = constraint_penalty.mean()
-                metra_loss += metra_pol.lambda_param.detach() * constraint_penalty 
+                metra_loss -= metra_pol.lambda_param.detach() * constraint_penalty 
                 loss += metra_loss
 
                 lagrange_loss = metra_pol.lambda_param * constraint_penalty.detach()
@@ -1171,6 +1171,11 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
         )
 
+    phi_state = dict(
+        lstm_h=torch.zeros(num_agents, policy.policy.hidden_size, device=device),
+        lstm_c=torch.zeros(num_agents, policy.policy.hidden_size, device=device),
+    )
+
     if args['train']['metra']:
         skills = load_skills(args, vecenv)
         num_agents_per_env = args['env'].get('num_agents', 1)
@@ -1188,10 +1193,10 @@ def eval(env_name, args=None, vecenv=None, policy=None):
     
         # Replace with this to get only a single genome
         # breakpoint()
-        # state['skills'] = skills[3].expand(ob.shape[0], -1)
+        state['skills'] = skills[3].expand(ob.shape[0], -1)
 
     # render = driver.render()
-    breakpoint()
+    # breakpoint()
 
     # Metra visualization
     n = 512
@@ -1226,8 +1231,8 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             action = action.cpu().numpy().reshape(vecenv.action_space.shape)
 
             s[i, :, :] = ob
-            phi_ob = policy.policy.phi_forward(ob, state)
-            phis[i, :, :] = phi_ob
+            # phi_ob = policy.policy.phi_forward(ob, phi_state)
+            # phis[i, :, :] = phi_ob
             i += 1
 
         if isinstance(logits, torch.distributions.Normal):
@@ -1253,7 +1258,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
     phis = phis.mean(axis=0)
 
     X = s.reshape(-1, ob.shape[-1]).cpu().numpy()
-    Z = phis.reshape(-1, state['skills'].shape[-1]).cpu().numpy()
+    # Z = phis.reshape(-1, state['skills'].shape[-1]).cpu().numpy()
     # y = np.tile(np.arange(len(skills)).repeat(agents_per_skill), n)
     y = np.arange(len(skills)).repeat(agents_per_skill)
 
@@ -1262,7 +1267,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
     # y = y[idx]
     # Z = Z[idx]
     X_scaled = StandardScaler().fit_transform(X)
-    Z_scaled = StandardScaler().fit_transform(Z)
+    # Z_scaled = StandardScaler().fit_transform(Z)
 
     # t-SNE visualization
     # tsne = TSNE(n_components=2, random_state=42, perplexity=30)
@@ -1278,12 +1283,12 @@ def eval(env_name, args=None, vecenv=None, policy=None):
     plt.title("UMAP of Observations colored by Skill")
     plt.savefig("umap_skills_avg.png", dpi=300)
 
-    Z_umap = reducer.fit_transform(Z_scaled)
-    plt.figure(figsize=(8,6))
-    scatter = plt.scatter(Z_umap[:,0], Z_umap[:,1], c=y, cmap='tab10', alpha=0.7)
-    plt.legend(*scatter.legend_elements(), title="Skills")
-    plt.title("UMAP of Phi Outputs colored by Skill")
-    plt.savefig("umap_phi_skills_avg.png", dpi=300)
+    # Z_umap = reducer.fit_transform(Z_scaled)
+    # plt.figure(figsize=(8,6))
+    # scatter = plt.scatter(Z_umap[:,0], Z_umap[:,1], c=y, cmap='tab10', alpha=0.7)
+    # plt.legend(*scatter.legend_elements(), title="Skills")
+    # plt.title("UMAP of Phi Outputs colored by Skill")
+    # plt.savefig("umap_phi_skills_avg.png", dpi=300)
 
     
     # Train classifier to predict skill from s
