@@ -334,7 +334,7 @@ class VQVAE(nn.Module):
     VQ-VAE model for discrete representation learning of images.
     To be used with VQ-Elites
     """
-    def __init__(self, env, z_dim, num_embeddings, commitment_cost=0.25):
+    def __init__(self, env, z_dim, num_embeddings):
         super().__init__()
         self.obs_shape = env.single_observation_space.shape
         self.num_embeddings = num_embeddings
@@ -376,7 +376,6 @@ class VQVAE(nn.Module):
             nn.Linear(64, input_size),
             # nn.Sigmoid()
         )
-        self.commitment_cost = commitment_cost
 
     def forward(self, x):
         # x shape (B, T, *obs_shape)
