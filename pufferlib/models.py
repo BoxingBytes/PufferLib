@@ -340,7 +340,9 @@ class VQVAE(nn.Module):
         self.num_embeddings = num_embeddings
         self.z_dim = z_dim
         self.codebook = nn.Embedding(num_embeddings, z_dim)
-        self.codebook.weight.data.uniform_(-1/num_embeddings, 1/num_embeddings)
+        self.codebook.weight.data.uniform_(-1, 1)
+        self.register_buffer('ema_count', torch.ones(self.num_embeddings))
+        self.register_buffer('ema_weight', self.codebook.weight.data.clone())
 
         try:
             self.is_dict_obs = isinstance(env.env.observation_space, pufferlib.spaces.Dict) 
@@ -349,49 +351,71 @@ class VQVAE(nn.Module):
 
         if self.is_dict_obs:
             self.dtype = pufferlib.pytorch.nativize_dtype(env.emulated)
-            input_size = int(sum(np.prod(v.shape) for v in env.env.observation_space.values()))
+            self.input_size = int(sum(np.prod(v.shape) for v in env.env.observation_space.values()))
         else:
-            input_size = np.prod(env.single_observation_space.shape)
+            self.input_size = np.prod(env.single_observation_space.shape)
 
+        # self.input_size *= 64 
         self.encoder = torch.nn.Sequential(
-            nn.Linear(input_size, 64),
+            nn.Linear(self.input_size, 64),
             nn.ReLU(),
-            nn.Linear(64, 128),
+            nn.Linear(64, 32),
             nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, z_dim)
+            nn.Linear(32, z_dim),
+            # nn.LayerNorm(z_dim),
         )
         self.decoder = torch.nn.Sequential(
-            nn.Linear(z_dim, 64),
+            nn.Linear(z_dim, 32),
             nn.ReLU(),
-            nn.Linear(64, 128),
+            nn.Linear(32, 64),
             nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, input_size),
-            # nn.Sigmoid()
+            nn.Linear(64, self.input_size),
         )
 
-    def forward(self, x):
+    def obs_to_rawbd(self, x):
+        """Convert a batch of observations to raw behavior descriptors (raw BD)."""
         # x shape (B, T, *obs_shape)
-        z = self.encoder(x) # (B, T, z_dim)
+        B, T, obs_shape = x.shape
+        # raw_bd = x[:,-1,:] - x[:,0,:] # (B, *obs_shape) - Basic RAW BD
+        raw_bd = x.mean(dim=1, keepdim=True)  # (B, 1, *obs_shape) - Average RAW BD
+        # raw_bd = x.reshape(B, T*obs_shape)  # (B, T**obs_shape) - Full Trajectory RAW BD
+        raw_bd = raw_bd.squeeze()
+        return raw_bd
+    
+    def forward(self, x):
+        """Take a batch of raw observations, encode, quantize and reconstruct."""
+
+        # x shape (B, T, *obs_shape)
+        # raw_bd = self.obs_to_rawbd(x) # (B, *obs_shape)
+        raw_bd = x  # Assume x is already raw BD (B, *obs_shape)
+
+        z_e = self.encoder(raw_bd) # (B, z_dim)
 
         # Vector quantization
-        z_flattened = z.view(-1, self.z_dim) # (B*T, z_dim)
+        z_flattened = z_e.view(-1, self.z_dim) # (B, z_dim)
         distances = (torch.sum(z_flattened**2, dim=1, keepdim=True) 
                      + torch.sum(self.codebook.weight**2, dim=1)
-                     - 2 * torch.matmul(z_flattened, self.codebook.weight.t())) # (B*T, num_embeddings)
-        encoding_indices = torch.argmin(distances, dim=1).unsqueeze(1) # (B*T, 1)
-        z_q = self.codebook(encoding_indices).view(z.shape) # (B, T, z_dim)
-
-        # Decoder
-        x_recon = self.decoder(z_q) # (B, T, *obs_shape)
-
-        return x_recon, z, z_q, encoding_indices 
+                     - 2 * torch.matmul(z_flattened, self.codebook.weight.t())) # (B, num_embeddings)
+        encoding_indices = torch.argmin(distances, dim=1).unsqueeze(1) # (B, 1)
         
+        z_q = self.codebook(encoding_indices).view(z_e.shape) # (B, z_dim)
+        # straight-through: decoder gradient flows into encoder
+        z_q = z_e + (z_q - z_e).detach()
+
+        x_recon = self.decoder(z_q) # (B, *obs_shape)
+
+        return x_recon, z_e, z_q, encoding_indices 
+        
+    def initalize_codebook_kmeans(self, n_samples: int = 10000, device='cpu'):
+        from sklearn.cluster import KMeans
+        with torch.no_grad():
+            samples = torch.rand(n_samples, self.input_size, device=device) * 2 - 1  # uniform [-1,1]
+
+            z_e_samples = self.encoder(samples).cpu().numpy()
+            # z_e_samples = samples.cpu().numpy()
+
+            kmeans = KMeans(n_clusters=self.num_embeddings, n_init=5, random_state=0)
+            kmeans.fit(z_e_samples)
+            centroids = torch.tensor(kmeans.cluster_centers_, dtype=torch.float32, device=device)
+            self.codebook.weight.data.copy_(centroids)
 

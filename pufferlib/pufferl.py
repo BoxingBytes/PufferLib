@@ -207,8 +207,29 @@ class PuffeRL:
         self.last_stats = defaultdict(list)
         self.losses = {}
 
-        # Dashboard
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
+
+        # VQ VAE
+        grid_size = num_embeddings = config["num_vq_embeddings"]
+        embedding_dim = config["vq_embedding_dim"]
+        env_module = importlib.import_module('pufferlib.models')
+        vq_policy_cls = getattr(env_module, 'VQVAE')
+        vq_policy = vq_policy_cls(vecenv.driver_env, embedding_dim, num_embeddings)
+
+        self.vae_policy = vq_policy
+        self.vae_policy.initalize_codebook_kmeans()
+        self.vq_params = sum(p.numel() for p in self.vae_policy.parameters() if p.requires_grad)
+        self.archive_params = torch.zeros((grid_size, self.model_size), dtype=getattr(torch, precision), device=config['device'])
+        self.archive_fitness = torch.full((grid_size,), float("-inf"), dtype=getattr(torch, precision), device=config['device'])
+
+        self.vq_optimizer = torch.optim.Adam(
+            self.vae_policy.parameters(),
+            lr=config['vq_learning_rate'],
+            betas=(config['vq_adam_beta1'], config['vq_adam_beta2']),
+            eps=config['vq_adam_eps'],
+        )
+
+        # Dashboard
         self.print_dashboard(clear=True)
 
     @property
@@ -471,6 +492,55 @@ class PuffeRL:
 
         return logs
 
+    def train_vq_vae(self, obs):
+        config = self.config
+        device = config['device']
+
+        K, B, raw_bd_shape = obs.shape
+        obs = obs.reshape(K*B, -1)
+        dataset_size = obs.shape[0]
+
+        for epoch in range(config["vq_training_steps"]):
+
+            perm = torch.randperm(dataset_size, device=device)
+            for start in range(0, dataset_size, self.minibatch_size):
+                idx = perm[start:start + self.minibatch_size]
+
+                mb_obs_bd = obs[idx]
+
+                x_recon, z_e, z_q, z_q_idx = self.vae_policy(mb_obs_bd)
+
+                l_recon = torch.nn.functional.mse_loss(x_recon, mb_obs_bd)
+                l_commit = torch.nn.functional.mse_loss(z_e, z_q.detach()) * config["vq_commitment_beta"]
+                loss = l_recon + l_commit
+                self.vq_optimizer.zero_grad()
+                loss.backward()
+                self.vq_optimizer.step()
+
+                # EMA update instead of codebook loss
+                with torch.no_grad():
+                    one_hot = torch.nn.functional.one_hot(
+                        z_q_idx.squeeze(), num_classes=self.vae_policy.num_embeddings
+                    ).float() # (B, num_embeddings)
+                    batch_counts = one_hot.sum(0) # (num_embeddings,)
+                    
+                    batch_weight = one_hot.T @ z_e.view(-1, self.vae_policy.z_dim) # (num_embeddings, z_dim)
+
+                    ema_decay = 0.5
+                    self.vae_policy.ema_count = (
+                        ema_decay * self.vae_policy.ema_count + 
+                        (1-ema_decay) * batch_counts
+                    )
+                    self.vae_policy.ema_weight = (
+                        ema_decay * self.vae_policy.ema_weight + 
+                        (1-ema_decay) * batch_weight
+                    )
+                    self.vae_policy.codebook.weight.data = (
+                        self.vae_policy.ema_weight / self.vae_policy.ema_count.unsqueeze(1)
+                    )
+            # print(f"[VQ-VAE] Epoch {epoch+1}/{config["vq_training_steps"]} | Recon: {l_recon.item():.6f} | Commit: {l_commit.item():.6f}")
+        return 
+            
     def mean_and_log(self):
         config = self.config
         for k in list(self.stats.keys()):
@@ -885,6 +955,18 @@ class WandbLogger:
         model_file = max(os.listdir(data_dir))
         return f'{data_dir}/{model_file}'
  
+def extract_params(policy):
+    """Flatten all params into a single 1D vector."""
+    return torch.cat([p.data.flatten() for p in policy.parameters()])
+
+def load_params(thetas, policy):
+    """Load flattened 1D vector params into policy."""
+    pointer = 0
+    for p in policy.parameters():
+        num_params = p.numel()
+        p.data = thetas[pointer:pointer + num_params].view_as(p).data.clone()
+        pointer += num_params
+
 def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     args = args or load_config(env_name)
 
@@ -898,6 +980,12 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
         print(f"rank: {local_rank}, MASTER_ADDR={master_addr}, MASTER_PORT={master_port}")
         torch.cuda.set_device(local_rank)
         os.environ["CUDA_VISIBLE_DEVICES"] = str(local_rank)
+
+    backend = args['vec']['backend']
+    if backend != 'PufferEnv':
+        backend = 'Serial'
+
+    args['vec'] = dict(backend=backend, num_envs=1)
 
     vecenv = vecenv or load_env(env_name, args)
     policy = policy or load_policy(args, vecenv, env_name)
@@ -925,17 +1013,107 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     pufferl = PuffeRL(train_config, vecenv, policy, logger)
 
     all_logs = []
+
+    #########################################################
+    # BOOSTRAP PROCEDURE
+    #########################################################
+    K = pufferl.archive_params.shape[0]
+    policies_params = torch.empty(K, pufferl.model_size)
+    scale = 2
+    torch.nn.init.uniform_(policies_params, -scale, scale)
+    # Buffer
+    B, T = pufferl.values.shape 
+    raw_bd_shape = 28 # TBD
+    bd_buffer = torch.zeros((K, B, raw_bd_shape))
+    rewards_buffer = torch.zeros((K, ))
+
+    # Debug 
+    # z_es = torch.zeros((10, pufferl.vae_policy.z_dim)) 
+
+    for i in range(K):
+        random_params = policies_params[i]  
+        load_params(random_params, pufferl.policy)
+        pufferl.evaluate()
+
+        # all_obs[i] = pufferl.observations.clone()
+        if train_config['device'] == 'cuda':
+            torch.compiler.cudagraph_mark_step_begin()
+
+        raw_bd = pufferl.vae_policy.obs_to_rawbd(pufferl.observations)
+        bd_buffer[i] = raw_bd 
+        rewards_buffer[i] = pufferl.rewards.mean()
+
+    pufferl.train_vq_vae(bd_buffer)
+
+    with torch.no_grad():
+        x_recon, z_e, z_q, encoding_indices = pufferl.vae_policy.forward(bd_buffer.reshape(-1, raw_bd_shape))
+
+
+    # We map each policy to one codebook. But they can map to different codebooks, so we pick the most used
+    z_q = z_q.reshape(K, B, -1)
+    codebook_indices = encoding_indices.reshape(K, B, -1)
+    cell_indices = torch.mode(codebook_indices, dim=1).values # (K,)
+
+    for i in range(K): 
+        cell = cell_indices[i].item()
+        params = policies_params[i]
+        fitness = rewards_buffer[i].item()
+        curr_fitness = pufferl.archive_fitness[cell].item()
+        if fitness >= curr_fitness:
+            pufferl.archive_fitness[cell] = fitness
+            pufferl.archive_params[cell] = params.clone()
+    #########################################################
+    # MAIN TRAINING LOOP
+    #########################################################
+    pufferl.global_step = 0
+    i = 0
     while pufferl.global_step < train_config['total_timesteps']:
+        #########################################################
+        # EVOLUTION PHASE
+        #########################################################
+        # Select random solution from archive
+        while True: 
+            idx = random.randint(0, pufferl.archive_params.shape[0]-1)
+            fitness = pufferl.archive_fitness[idx].item()
+            if fitness > -1e8:
+                break
+        params = pufferl.archive_params[idx]
+        # Perform mutation
+        mutated_params = params + torch.randn_like(params) * 2.0
+
+        # Evaluate new solution
+        load_params(mutated_params, pufferl.policy)
         if train_config['device'] == 'cuda':
             torch.compiler.cudagraph_mark_step_begin()
         pufferl.evaluate()
-        if train_config['device'] == 'cuda':
-            torch.compiler.cudagraph_mark_step_begin()
-        logs = pufferl.train()
+        # Get behavior descriptor and fitness
+        raw_bd = pufferl.vae_policy.obs_to_rawbd(pufferl.observations) # (B, raw_bd_shape)
+        bd_buffer[i%K] = raw_bd 
+        fitness = pufferl.rewards.mean().item()
+        with torch.no_grad():
+            x_recon, z_e, z_q, encoding_indices = pufferl.vae_policy.forward(raw_bd)
 
-        if logs is not None:
-            if pufferl.global_step > 0.20*train_config['total_timesteps']:
-                all_logs.append(logs)
+        cell_idx = torch.mode(encoding_indices, dim=0).values
+        if pufferl.archive_fitness[cell_idx] < fitness:
+            pufferl.archive_fitness[cell_idx] = fitness
+            pufferl.archive_params[cell_idx] = mutated_params.clone()
+
+        if i % K == 0:
+            #########################################################
+            # Update VQ-VAE model
+            ######################################################### 
+            pufferl.train_vq_vae(bd_buffer)
+
+        #######################################################################
+        
+        i += 1
+
+    ##########################################################
+    # Pick the params with highest fitness 
+    breakpoint()
+    best_idx = torch.argmax(pufferl.archive_fitness).item()
+    best_params = pufferl.archive_params[best_idx]
+    load_params(best_params, pufferl.policy)
 
     # Final eval. You can reset the env here, but depending on
     # your env, this can skew data (i.e. you only collect the shortest
