@@ -357,7 +357,9 @@ class VQVAE(nn.Module):
 
         # self.input_size *= 64 
         self.encoder = torch.nn.Sequential(
-            nn.Linear(self.input_size, 64),
+            nn.Linear(self.input_size, 32),
+            nn.ReLU(),
+            nn.Linear(32, 64),
             nn.ReLU(),
             nn.Linear(64, 32),
             nn.ReLU(),
@@ -369,7 +371,9 @@ class VQVAE(nn.Module):
             nn.ReLU(),
             nn.Linear(32, 64),
             nn.ReLU(),
-            nn.Linear(64, self.input_size),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, self.input_size),
         )
 
     def obs_to_rawbd(self, x):

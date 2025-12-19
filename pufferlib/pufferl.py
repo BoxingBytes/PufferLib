@@ -503,7 +503,7 @@ class PuffeRL:
         for epoch in range(config["vq_training_steps"]):
 
             perm = torch.randperm(dataset_size, device=device)
-            for start in range(0, dataset_size, self.minibatch_size):
+            for start in range(0, dataset_size, B):
                 idx = perm[start:start + self.minibatch_size]
 
                 mb_obs_bd = obs[idx]
@@ -515,6 +515,7 @@ class PuffeRL:
                 loss = l_recon + l_commit
                 self.vq_optimizer.zero_grad()
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.vae_policy.parameters(), 1.0)
                 self.vq_optimizer.step()
 
                 # EMA update instead of codebook loss
@@ -536,9 +537,11 @@ class PuffeRL:
                         (1-ema_decay) * batch_weight
                     )
                     self.vae_policy.codebook.weight.data = (
-                        self.vae_policy.ema_weight / self.vae_policy.ema_count.unsqueeze(1)
+                        self.vae_policy.ema_weight / (self.vae_policy.ema_count.unsqueeze(1) + 1e-5)
                     )
-            # print(f"[VQ-VAE] Epoch {epoch+1}/{config["vq_training_steps"]} | Recon: {l_recon.item():.6f} | Commit: {l_commit.item():.6f}")
+            used_codes = z_q_idx.unique().numel()
+            print(f"Using {used_codes}/{self.vae_policy.num_embeddings} codes in this batch")
+            print(f"[VQ-VAE] Epoch {epoch+1}/{config["vq_training_steps"]} | Recon: {l_recon.item():.6f} | Commit: {l_commit.item():.6f}")
         return 
             
     def mean_and_log(self):
@@ -1045,23 +1048,24 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
 
     pufferl.train_vq_vae(bd_buffer)
 
-    with torch.no_grad():
-        x_recon, z_e, z_q, encoding_indices = pufferl.vae_policy.forward(bd_buffer.reshape(-1, raw_bd_shape))
+    # with torch.no_grad():
+    #     x_recon, z_e, z_q, encoding_indices = pufferl.vae_policy.forward(bd_buffer.reshape(-1, raw_bd_shape))
 
 
-    # We map each policy to one codebook. But they can map to different codebooks, so we pick the most used
-    z_q = z_q.reshape(K, B, -1)
-    codebook_indices = encoding_indices.reshape(K, B, -1)
-    cell_indices = torch.mode(codebook_indices, dim=1).values # (K,)
+    # # We map each policy to one codebook. But they can map to different codebooks, so we pick the most used
+    # z_q = z_q.reshape(K, B, -1)
+    # codebook_indices = encoding_indices.reshape(K, B, -1)
+    # cell_indices = torch.mode(codebook_indices, dim=1).values # (K,)
 
-    for i in range(K): 
-        cell = cell_indices[i].item()
-        params = policies_params[i]
-        fitness = rewards_buffer[i].item()
-        curr_fitness = pufferl.archive_fitness[cell].item()
-        if fitness >= curr_fitness:
-            pufferl.archive_fitness[cell] = fitness
-            pufferl.archive_params[cell] = params.clone()
+    # for i in range(K): 
+    #     cell = cell_indices[i].item()
+    #     params = policies_params[i]
+    #     fitness = rewards_buffer[i].item()
+    #     curr_fitness = pufferl.archive_fitness[cell].item()
+    #     if fitness >= curr_fitness:
+    #         pufferl.archive_fitness[cell] = fitness
+    #         pufferl.archive_params[cell] = params.clone()
+
     #########################################################
     # MAIN TRAINING LOOP
     #########################################################
@@ -1072,11 +1076,13 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
         # EVOLUTION PHASE
         #########################################################
         # Select random solution from archive
-        while True: 
-            idx = random.randint(0, pufferl.archive_params.shape[0]-1)
-            fitness = pufferl.archive_fitness[idx].item()
-            if fitness > -1e8:
-                break
+        # while True: 
+        #     idx = random.randint(0, pufferl.archive_params.shape[0]-1)
+        #     fitness = pufferl.archive_fitness[idx].item()
+        #     if fitness > -1e8:
+        #         break
+        idx = random.randint(0, pufferl.archive_params.shape[0]-1)
+        # fitness = pufferl.archive_fitness[idx].item()
         params = pufferl.archive_params[idx]
         # Perform mutation
         mutated_params = params + torch.randn_like(params) * 2.0
@@ -1110,7 +1116,6 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
 
     ##########################################################
     # Pick the params with highest fitness 
-    breakpoint()
     best_idx = torch.argmax(pufferl.archive_fitness).item()
     best_params = pufferl.archive_params[best_idx]
     load_params(best_params, pufferl.policy)
