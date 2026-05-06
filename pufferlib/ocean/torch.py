@@ -18,7 +18,84 @@ Recurrent = pufferlib.models.LSTMWrapper
 from pufferlib.pytorch import layer_init, _nativize_dtype, nativize_tensor
 import numpy as np
 
+class skill_conditionned(nn.Module):
+    def __init__(self, env, hidden_size=128, skill_dim=16, **kwargs):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.skill_dim = skill_dim
+        
+        # TEST
+        input_size = skill_dim
 
+        self.is_multidiscrete = isinstance(env.single_action_space,
+                pufferlib.spaces.MultiDiscrete)
+        self.is_continuous = isinstance(env.single_action_space,
+                pufferlib.spaces.Box)
+        try:
+            self.is_dict_obs = isinstance(env.env.observation_space, pufferlib.spaces.Dict) 
+        except:
+            self.is_dict_obs = isinstance(env.observation_space, pufferlib.spaces.Dict) 
+
+        if self.is_dict_obs:
+            self.dtype = pufferlib.pytorch.nativize_dtype(env.emulated)
+            # TEST
+            # input_size = int(sum(np.prod(v.shape) for v in env.env.observation_space.values()))
+            # input_size += skill_dim
+            self.encoder = nn.Linear(input_size, self.hidden_size)
+        else:
+            # TEST
+            # input_size = np.prod(env.single_observation_space.shape)
+            # input_size += skill_dim
+            self.encoder = torch.nn.Sequential(
+                pufferlib.pytorch.layer_init(nn.Linear(input_size, hidden_size)),
+                nn.GELU(),
+            )
+        if self.is_multidiscrete:
+            self.action_nvec = tuple(env.single_action_space.nvec)
+            num_atns = sum(self.action_nvec)
+            self.decoder = pufferlib.pytorch.layer_init(
+                    nn.Linear(hidden_size, num_atns), std=0.01)
+        elif not self.is_continuous:
+            num_atns = env.single_action_space.n
+            self.decoder = pufferlib.pytorch.layer_init(
+                nn.Linear(hidden_size, num_atns), std=0.01)
+        else:
+            self.decoder_mean = pufferlib.pytorch.layer_init(
+                nn.Linear(hidden_size, env.single_action_space.shape[0]), std=0.01)
+            self.decoder_logstd = nn.Parameter(torch.zeros(
+                1, env.single_action_space.shape[0]))
+
+        self.value = pufferlib.pytorch.layer_init(
+            nn.Linear(hidden_size, 1), std=1)
+
+    def forward_eval(self, observations, state=None):
+        hidden = self.encode_observations(observations, state=state)
+        logits, values = self.decode_actions(hidden)
+        return logits, values
+
+    def forward(self, observations, state=None):
+        return self.forward_eval(observations, state)
+    
+    def encode_observations(self, observations, state=None):
+        skill = state['skill']
+        # TEST
+        observations = skill
+        # observations = torch.cat([observations, skill], dim=-1)
+        return self.encoder(observations)
+    
+    def decode_actions(self, hidden):
+        if self.is_multidiscrete:
+            logits = self.decoder(hidden).split(self.action_nvec, dim=1)
+        elif self.is_continuous:
+            mean = self.decoder_mean(hidden)
+            logstd = self.decoder_logstd.expand_as(mean)
+            std = torch.exp(logstd)
+            logits = torch.distributions.Normal(mean, std)
+        else:
+            logits = self.decoder(hidden)
+        value = self.value(hidden)
+        return logits, value
+        
 class Boids(nn.Module):
     def __init__(self, env, cnn_channels=32, hidden_size=128, **kwargs):
         super().__init__()
