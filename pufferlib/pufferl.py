@@ -477,7 +477,7 @@ class PuffeRL:
 
             entropy_loss = entropy.mean()
 
-            loss = pg_loss #+ config['vf_coef']*v_loss - config['ent_coef']*entropy_loss
+            loss = pg_loss + config['vf_coef']*v_loss - config['ent_coef']*entropy_loss
             self.amp_context.__enter__() # TODO: AMP needs some debugging
 
             # This breaks vloss clipping?
@@ -532,7 +532,9 @@ class PuffeRL:
             # Learn on accumulated minibatches
             profile('learn', epoch)
             loss.backward()
-            breakpoint()
+            if 24_000_000 < self.global_step < 26_000_000:
+                breakpoint()
+            # breakpoint()
             if (mb + 1) % self.accumulate_minibatches == 0:
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), config['max_grad_norm'])
                 losses['grad_norm'] += torch.nn.utils.clip_grad_norm_(self.policy.parameters(), float('inf')).item() / self.total_minibatches
@@ -1094,7 +1096,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
         )
     skills = torch.eye(args['policy']['skill_dim'], device=device)
-    skill = skills[4].unsqueeze(0).expand(num_agents, -1)
+    skill = skills[0].unsqueeze(0).expand(num_agents, -1)
     state['skill'] = skill  
     frames = []
     while True:
