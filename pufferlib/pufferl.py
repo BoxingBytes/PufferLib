@@ -109,9 +109,11 @@ class PuffeRL:
         self.ep_indices = torch.arange(total_agents, device=device, dtype=torch.int32)
         self.free_idx = total_agents
 
-        self.skills = torch.eye(config['policy_args']['skill_dim'], device=device) 
+        # TEST
+        # self.skill_dim = 5
         self.skill_dim = config['policy_args']['skill_dim']
-        self.agents_skills = self.skills[torch.arange(total_agents, device=device) % config['policy_args']['skill_dim']]   
+        self.skills = torch.eye(self.skill_dim, device=device) 
+        self.agents_skills = self.skills[torch.arange(total_agents, device=device) % self.skill_dim]   
         # LSTM
         if config['use_rnn']:
             n = vecenv.agents_per_batch
@@ -379,9 +381,22 @@ class PuffeRL:
             # We want to endup with average TV to other skills 
             r_div = r_div.masked_fill(mask_self, 0).sum(dim=-1) / (self.skill_dim - 1)
             r_div = r_div.reshape(self.rewards.shape)
+            r_div = r_div * 2 - 1
             return r_div.detach()
+        
+        def compute_r_per_atn(obs, atn, b_idx):
 
-        self.rewards = compute_rdiv(self.observations, torch.arange(self.segments, device=device))
+            atns_onehot = torch.nn.functional.one_hot(atn.reshape(-1), num_classes=self.vecenv.single_action_space.n) # (B*TT, n_actions)
+            skills = self.agents_skills.unsqueeze(1).expand(
+                obs.shape[0], obs.shape[1], -1
+            )[b_idx].reshape(-1, self.skill_dim) # (B*TT, skill_dim)
+            assert atns_onehot.shape[-1] == skills.shape[-1], "hardcoded for atn shape == skill_dim"
+            rewards = (atns_onehot * skills).sum(dim=-1).reshape(self.rewards.shape) # (B, TT)
+            rewards = rewards * 2 - 1 
+            return rewards.detach() 
+            
+        # self.rewards = compute_rdiv(self.observations, torch.arange(self.segments, device=device))
+        self.rewards = compute_r_per_atn(self.observations, self.actions, torch.arange(self.segments, device=device))
 
         for mb in range(self.total_minibatches):
             profile('train_misc', epoch)
@@ -392,6 +407,7 @@ class PuffeRL:
             advantages = compute_puff_advantage(self.values, self.rewards,
                 self.terminals, self.ratio, advantages, config['gamma'],
                 config['gae_lambda'], config['vtrace_rho_clip'], config['vtrace_c_clip'])
+
             # Prioritize experience by advantage magnitude
             adv = advantages.abs().sum(axis=1)
             prio_weights = torch.nan_to_num(adv**a, 0, 0, 0)
@@ -461,7 +477,7 @@ class PuffeRL:
 
             entropy_loss = entropy.mean()
 
-            loss = pg_loss + config['vf_coef']*v_loss - config['ent_coef']*entropy_loss
+            loss = pg_loss #+ config['vf_coef']*v_loss - config['ent_coef']*entropy_loss
             self.amp_context.__enter__() # TODO: AMP needs some debugging
 
             # This breaks vloss clipping?
@@ -516,6 +532,7 @@ class PuffeRL:
             # Learn on accumulated minibatches
             profile('learn', epoch)
             loss.backward()
+            breakpoint()
             if (mb + 1) % self.accumulate_minibatches == 0:
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), config['max_grad_norm'])
                 losses['grad_norm'] += torch.nn.utils.clip_grad_norm_(self.policy.parameters(), float('inf')).item() / self.total_minibatches
