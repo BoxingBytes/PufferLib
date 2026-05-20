@@ -164,7 +164,6 @@ MAKE_FUNCTIONS = {
     'multiagent': make_multiagent,
     'slimevolley': 'SlimeVolley',
     'predprey': 'PredPrey',
-    'testMax': 'testMax',
 }
 
 def env_creator(name='squared', *args, **kwargs):
