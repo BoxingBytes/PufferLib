@@ -8,9 +8,9 @@ from pufferlib.ocean.testMax import binding
 
 class testMax(pufferlib.PufferEnv):
     def __init__(self, num_envs=1, render_mode=None, log_interval=128, size=5, buf=None, seed=0):
-        self.single_observation_space = gymnasium.spaces.Box(low=0, high=1,
+        self.single_observation_space = gymnasium.spaces.Box(low=0, high=4,
             shape=(1,), dtype=np.uint8)
-        self.single_action_space = gymnasium.spaces.Discrete(2)
+        self.single_action_space = gymnasium.spaces.Discrete(5)
         self.render_mode = render_mode
         self.num_agents = num_envs
 

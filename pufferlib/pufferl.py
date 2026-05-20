@@ -1081,6 +1081,14 @@ def eval(env_name, args=None, vecenv=None, policy=None):
     vecenv = vecenv or load_env(env_name, args)
 
     policy = policy or load_policy(args, vecenv, env_name)
+
+    # TEST
+    for x in range(5):
+        obs = torch.tensor([[x]], dtype=torch.float32)
+        logits, _ = policy.forward_eval(obs)
+        print(f"x={x}: {torch.softmax(logits, -1)}")
+
+    breakpoint()
     ob, info = vecenv.reset()
     driver = vecenv.driver_env
     num_agents = vecenv.observation_space.shape[0]
