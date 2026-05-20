@@ -110,8 +110,8 @@ class PuffeRL:
         self.free_idx = total_agents
 
         # TEST
-        # self.skill_dim = 5
-        self.skill_dim = config['policy_args']['skill_dim']
+        self.skill_dim = 5
+        # self.skill_dim = config['policy_args']['skill_dim']
         self.skills = torch.eye(self.skill_dim, device=device) 
         self.agents_skills = self.skills[torch.arange(total_agents, device=device) % self.skill_dim]   
         # LSTM
@@ -396,7 +396,7 @@ class PuffeRL:
             return rewards.detach() 
             
         # self.rewards = compute_rdiv(self.observations, torch.arange(self.segments, device=device))
-        self.rewards = compute_r_per_atn(self.observations, self.actions, torch.arange(self.segments, device=device))
+        # self.rewards = compute_r_per_atn(self.observations, self.actions, torch.arange(self.segments, device=device))
 
         for mb in range(self.total_minibatches):
             profile('train_misc', epoch)
@@ -484,27 +484,27 @@ class PuffeRL:
             self.values[idx] = newvalue.detach().float()
 
             # Logging per skill
-            rewards_sk = dict()
-            for z in range(self.skill_dim):
-                rewards_sk[z] = mb_rewards[(self.agents_skills[idx]==self.skills[z]).all(dim=1)]
-                losses[f'reward_sk{z}'] += rewards_sk[z].mean().item() / self.total_minibatches
+            # rewards_sk = dict()
+            # for z in range(self.skill_dim):
+            #     rewards_sk[z] = mb_rewards[(self.agents_skills[idx]==self.skills[z]).all(dim=1)]
+            #     losses[f'reward_sk{z}'] += rewards_sk[z].mean().item() / self.total_minibatches
 
-            with torch.no_grad():
-            #     obs = torch.ones(size=(1,1), device=device)
-            #     state = dict(
-            #         skill = self.skills[0].unsqueeze(0)
-            #     )
-            #     logits_0 = self.policy(obs, state)[0]
-            #     probs_0 = torch.softmax(logits_0, dim=-1)
-            #     state = dict(
-            #         skill = self.skills[1].unsqueeze(0)
-            #     )
-            #     logits_1 = self.policy(obs, state)[0]
-            #     probs_1 = torch.softmax(logits_1, dim=-1)
-            #     diff_logits = (logits_0 - logits_1).abs().mean()
-                s_weights = self.policy.encoder[0].weight[:, :-self.skill_dim].abs().mean()
-                z_weights = self.policy.encoder[0].weight[:, -self.skill_dim:].abs().mean()
-                z_bias = self.policy.encoder[0].bias[-self.skill_dim:].abs().mean()
+            # with torch.no_grad():
+            # #     obs = torch.ones(size=(1,1), device=device)
+            # #     state = dict(
+            # #         skill = self.skills[0].unsqueeze(0)
+            # #     )
+            # #     logits_0 = self.policy(obs, state)[0]
+            # #     probs_0 = torch.softmax(logits_0, dim=-1)
+            # #     state = dict(
+            # #         skill = self.skills[1].unsqueeze(0)
+            # #     )
+            # #     logits_1 = self.policy(obs, state)[0]
+            # #     probs_1 = torch.softmax(logits_1, dim=-1)
+            # #     diff_logits = (logits_0 - logits_1).abs().mean()
+            #     s_weights = self.policy.encoder[0].weight[:, :-self.skill_dim].abs().mean()
+            #     z_weights = self.policy.encoder[0].weight[:, -self.skill_dim:].abs().mean()
+            #     z_bias = self.policy.encoder[0].bias[-self.skill_dim:].abs().mean()
 
             # Logging
             profile('train_misc', epoch)
@@ -515,9 +515,9 @@ class PuffeRL:
             losses['approx_kl'] += approx_kl.item() / self.total_minibatches
             losses['clipfrac'] += clipfrac.item() / self.total_minibatches
             losses['importance'] += ratio.mean().item() / self.total_minibatches
-            losses['r_div_min'] += mb_rewards.min().item() / self.total_minibatches
-            losses['r_div_max'] += mb_rewards.max().item() / self.total_minibatches
-            losses['r_div_mean'] += mb_rewards.mean().item() / self.total_minibatches
+            # losses['r_div_min'] += mb_rewards.min().item() / self.total_minibatches
+            # losses['r_div_max'] += mb_rewards.max().item() / self.total_minibatches
+            # losses['r_div_mean'] += mb_rewards.mean().item() / self.total_minibatches
             losses['adv_mean'] += mb_advantages.mean().item() / self.total_minibatches
             losses['adv_std'] += mb_advantages.std().item() / self.total_minibatches
             # losses['sk0_left_prob'] += probs_0[0, 0].item() / self.total_minibatches
@@ -525,16 +525,13 @@ class PuffeRL:
             # losses['sk1_left_prob'] += probs_1[0, 0].item() / self.total_minibatches
             # losses['sk1_right_prob'] += probs_1[0, 1].item() / self.total_minibatches
             # losses['diff_logits'] += diff_logits.item() / self.total_minibatches
-            losses['skill_weights'] += z_weights.item() / self.total_minibatches
-            losses['state_weights'] += s_weights.item() / self.total_minibatches
-            losses['skill_bias'] += z_bias.item() / self.total_minibatches
+            # losses['skill_weights'] += z_weights.item() / self.total_minibatches
+            # losses['state_weights'] += s_weights.item() / self.total_minibatches
+            # losses['skill_bias'] += z_bias.item() / self.total_minibatches
 
             # Learn on accumulated minibatches
             profile('learn', epoch)
             loss.backward()
-            if 24_000_000 < self.global_step < 26_000_000:
-                breakpoint()
-            # breakpoint()
             if (mb + 1) % self.accumulate_minibatches == 0:
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), config['max_grad_norm'])
                 losses['grad_norm'] += torch.nn.utils.clip_grad_norm_(self.policy.parameters(), float('inf')).item() / self.total_minibatches
@@ -1095,9 +1092,9 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             lstm_h=torch.zeros(num_agents, policy.hidden_size, device=device),
             lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
         )
-    skills = torch.eye(args['policy']['skill_dim'], device=device)
-    skill = skills[0].unsqueeze(0).expand(num_agents, -1)
-    state['skill'] = skill  
+    # skills = torch.eye(args['policy']['skill_dim'], device=device)
+    # skill = skills[0].unsqueeze(0).expand(num_agents, -1)
+    # state['skill'] = skill  
     frames = []
     while True:
         render = driver.render()
