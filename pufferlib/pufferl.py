@@ -392,12 +392,13 @@ class PuffeRL:
             )[b_idx].reshape(-1, self.skill_dim) # (B*TT, skill_dim)
             assert atns_onehot.shape[-1] == skills.shape[-1], "hardcoded for atn shape == skill_dim"
             rewards = (atns_onehot * skills).sum(dim=-1).reshape(self.rewards.shape) # (B, TT)
-            rewards = rewards * 2 - 1 
-            return rewards.detach() 
+            rewards = rewards * 2 - 1
+            shifted = torch.zeros_like(rewards)
+            shifted[:, 1:] = rewards[:, :-1] 
+            return shifted.detach() 
             
         # self.rewards = compute_rdiv(self.observations, torch.arange(self.segments, device=device))
         self.rewards = compute_r_per_atn(self.observations, self.actions, torch.arange(self.segments, device=device))
-
         for mb in range(self.total_minibatches):
             profile('train_misc', epoch)
             self.amp_context.__enter__()
@@ -532,9 +533,7 @@ class PuffeRL:
             # Learn on accumulated minibatches
             profile('learn', epoch)
             loss.backward()
-            if 24_000_000 < self.global_step < 26_000_000:
-                breakpoint()
-            # breakpoint()
+
             if (mb + 1) % self.accumulate_minibatches == 0:
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), config['max_grad_norm'])
                 losses['grad_norm'] += torch.nn.utils.clip_grad_norm_(self.policy.parameters(), float('inf')).item() / self.total_minibatches
@@ -1096,7 +1095,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
         )
     skills = torch.eye(args['policy']['skill_dim'], device=device)
-    skill = skills[0].unsqueeze(0).expand(num_agents, -1)
+    skill = skills[4].unsqueeze(0).expand(num_agents, -1)
     state['skill'] = skill  
     frames = []
     while True:
