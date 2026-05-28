@@ -58,10 +58,10 @@ class skill_conditionned(nn.Module):
         elif not self.is_continuous:
             num_atns = env.single_action_space.n
             self.decoder = pufferlib.pytorch.layer_init(
-                nn.Linear(input_size, num_atns), std=0.01)
-            with torch.no_grad():
-                self.decoder.weight.copy_(torch.eye(skill_dim))
-                self.decoder.bias.zero_()
+                nn.Linear(hidden_size, num_atns), std=0.01)
+            # with torch.no_grad():
+            #     self.decoder.weight.copy_(torch.eye(skill_dim))
+            #     self.decoder.bias.zero_()
         else:
             self.decoder_mean = pufferlib.pytorch.layer_init(
                 nn.Linear(hidden_size, env.single_action_space.shape[0]), std=0.01)
@@ -69,11 +69,11 @@ class skill_conditionned(nn.Module):
                 1, env.single_action_space.shape[0]))
 
         self.value = pufferlib.pytorch.layer_init(
-            nn.Linear(input_size, 1), std=1)
+            nn.Linear(hidden_size, 1), std=1)
 
     def forward_eval(self, observations, state=None):
-        # hidden = self.encode_observations(observations, state=state)
-        logits, values = self.decode_actions(observations, state=state)
+        hidden = self.encode_observations(observations, state=state)
+        logits, values = self.decode_actions(hidden, state=state)
         return logits, values
 
     def forward(self, observations, state=None):
@@ -87,8 +87,8 @@ class skill_conditionned(nn.Module):
         return self.encoder(observations)
     
     def decode_actions(self, hidden, state=None):
-        skill = state['skill']
-        hidden = skill 
+        # skill = state['skill']
+        # hidden = skill 
         if self.is_multidiscrete:
             logits = self.decoder(hidden).split(self.action_nvec, dim=1)
         elif self.is_continuous:
