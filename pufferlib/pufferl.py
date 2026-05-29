@@ -114,6 +114,21 @@ class PuffeRL:
         self.skill_dim = config['policy_args']['skill_dim']
         self.skills = torch.eye(self.skill_dim, device=device) 
         self.agents_skills = self.skills[torch.arange(total_agents, device=device) % self.skill_dim]   
+        self.reward_function = torch.nn.Sequential(
+            torch.nn.Linear(self.skill_dim+obs_space.shape[-1], 128),
+            torch.nn.Tanh(),
+            torch.nn.Linear(128, 128),
+            torch.nn.Tanh(),
+            torch.nn.Linear(128, 1),
+            torch.nn.Tanh(),
+        )
+        for m in self.reward_function.modules():
+            if isinstance(m, torch.nn.Linear):
+                torch.nn.init.xavier_uniform_( m.weight, gain=torch.nn.init.calculate_gain('tanh'))
+                torch.nn.init.zeros_(m.bias)
+        for p in self.reward_function.parameters():
+            p.requires_grad = False
+
         # LSTM
         if config['use_rnn']:
             n = vecenv.agents_per_batch
@@ -431,11 +446,23 @@ class PuffeRL:
             # r_div = r_div * 2 - 1
 
             return r_div
-      
+    
+        def compute_r_per_z(obs, b_idx):
+            n_envs_steps = obs.shape[0] * obs.shape[1]
+            obs_flat = obs.reshape(-1, *self.vecenv.single_observation_space.shape)
+            n_actions = self.vecenv.single_action_space.n
+            skills_idx = self.agents_skills.unsqueeze(1).expand(
+                self.observations.shape[0], self.observations.shape[1], -1
+            )[b_idx].reshape(-1, self.skill_dim) # (B*TT,) actual skill index for each env step in replay buffer
+            r_obs = torch.cat([obs_flat, skills_idx], dim=-1)
+            rewards = self.reward_function(r_obs).reshape(obs.shape[:-1])
+            shifted = torch.zeros_like(rewards)
+            shifted[:, 1:] = rewards[:, :-1]
+            return shifted.detach()
         # self.rewards = compute_rdiv(self.observations, torch.arange(self.segments, device=device))
         # self.rewards = compute_r_per_atn(self.observations, self.actions, torch.arange(self.segments, device=device))
+        self.rewards = compute_r_per_z(self.observations, torch.arange(self.segments, device=device))
         
-
         for mb in range(self.total_minibatches):
             profile('train_misc', epoch)
             self.amp_context.__enter__()
@@ -464,8 +491,8 @@ class PuffeRL:
             mb_values = self.values[idx]
             mb_returns = advantages[idx] + mb_values
             mb_advantages = advantages[idx]
-            tv_loss = compute_tv_loss(mb_obs, idx)
-            mb_tv = tv_loss
+            # tv_loss = compute_tv_loss(mb_obs, idx)
+            # mb_tv = tv_loss
 
             profile('train_forward', epoch)
             if not config['use_rnn']:
@@ -517,8 +544,8 @@ class PuffeRL:
 
             entropy_loss = entropy.mean()
 
-            # loss = pg_loss + config['vf_coef']*v_loss - config['ent_coef']*entropy_loss
-            loss = -mb_tv.mean()
+            loss = pg_loss + config['vf_coef']*v_loss - config['ent_coef']*entropy_loss
+            # loss = -mb_tv.mean()
             self.amp_context.__enter__() # TODO: AMP needs some debugging
 
             # This breaks vloss clipping?
@@ -549,7 +576,7 @@ class PuffeRL:
 
             # Logging
             profile('train_misc', epoch)
-            losses['tv_loss'] += tv_loss.mean().item() / self.total_minibatches
+            # losses['tv_loss'] += tv_loss.mean().item() / self.total_minibatches
             losses['policy_loss'] += pg_loss.item() / self.total_minibatches
             losses['value_loss'] += v_loss.item() / self.total_minibatches
             losses['entropy'] += entropy_loss.item() / self.total_minibatches
@@ -1136,13 +1163,13 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
         )
     skills = torch.eye(args['policy']['skill_dim'], device=device)
-    skill = skills[4].unsqueeze(0).expand(num_agents, -1)
+    skill = skills[2].unsqueeze(0).expand(num_agents, -1)
     state['skill'] = skill
 
-    # for z in range(5):
-    #     state['skill'] = skills[z].unsqueeze(0).expand(num_agents, -1)
-    #     logits = policy.forward_eval(torch.as_tensor(ob).to(device), state)[0]
-    #     print(f'Skill {z} logits:', logits[0]) 
+    for z in range(5):
+        state['skill'] = skills[z].unsqueeze(0).expand(num_agents, -1)
+        logits = policy.forward_eval(torch.as_tensor(ob).to(device), state)[0]
+        print(f'Skill {z} logits:', logits[0]) 
     frames = []
     while True:
         render = driver.render()
