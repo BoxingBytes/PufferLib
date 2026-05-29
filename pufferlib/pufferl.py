@@ -1136,7 +1136,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
         )
     skills = torch.eye(args['policy']['skill_dim'], device=device)
-    skill = skills[0].unsqueeze(0).expand(num_agents, -1)
+    skill = skills[4].unsqueeze(0).expand(num_agents, -1)
     state['skill'] = skill
 
     # for z in range(5):

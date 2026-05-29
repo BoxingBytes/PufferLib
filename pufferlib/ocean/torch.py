@@ -25,7 +25,7 @@ class skill_conditionned(nn.Module):
         self.skill_dim = skill_dim
         
         # TEST
-        input_size = skill_dim
+        # input_size = skill_dim
 
         self.is_multidiscrete = isinstance(env.single_action_space,
                 pufferlib.spaces.MultiDiscrete)
@@ -39,13 +39,13 @@ class skill_conditionned(nn.Module):
         if self.is_dict_obs:
             self.dtype = pufferlib.pytorch.nativize_dtype(env.emulated)
             # TEST
-            # input_size = int(sum(np.prod(v.shape) for v in env.env.observation_space.values()))
-            # input_size += skill_dim
+            input_size = int(sum(np.prod(v.shape) for v in env.env.observation_space.values()))
+            input_size += skill_dim
             self.encoder = nn.Linear(input_size, self.hidden_size)
         else:
             # TEST
-            # input_size = np.prod(env.single_observation_space.shape)
-            # input_size += skill_dim
+            input_size = np.prod(env.single_observation_space.shape)
+            input_size += skill_dim
             self.encoder = torch.nn.Sequential(
                 pufferlib.pytorch.layer_init(nn.Linear(input_size, hidden_size)),
                 nn.GELU(),
@@ -59,9 +59,6 @@ class skill_conditionned(nn.Module):
             num_atns = env.single_action_space.n
             self.decoder = pufferlib.pytorch.layer_init(
                 nn.Linear(hidden_size, num_atns), std=0.01)
-            # with torch.no_grad():
-            #     self.decoder.weight.copy_(torch.eye(skill_dim))
-            #     self.decoder.bias.zero_()
         else:
             self.decoder_mean = pufferlib.pytorch.layer_init(
                 nn.Linear(hidden_size, env.single_action_space.shape[0]), std=0.01)
@@ -82,13 +79,11 @@ class skill_conditionned(nn.Module):
     def encode_observations(self, observations, state=None):
         skill = state['skill']
         # TEST
-        observations = skill
-        # observations = torch.cat([observations, skill], dim=-1)
+        # observations = skill
+        observations = torch.cat([observations, skill], dim=-1)
         return self.encoder(observations)
     
     def decode_actions(self, hidden, state=None):
-        # skill = state['skill']
-        # hidden = skill 
         if self.is_multidiscrete:
             logits = self.decoder(hidden).split(self.action_nvec, dim=1)
         elif self.is_continuous:
