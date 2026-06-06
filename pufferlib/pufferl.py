@@ -63,9 +63,9 @@ class PuffeRL:
 
         # Reproducibility
         seed = config['seed']
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
+        #random.seed(seed)
+        #np.random.seed(seed)
+        #torch.manual_seed(seed)
 
         # Vecenv info
         vecenv.async_reset(seed)
@@ -109,11 +109,6 @@ class PuffeRL:
         self.ep_indices = torch.arange(total_agents, device=device, dtype=torch.int32)
         self.free_idx = total_agents
 
-        # TEST
-        # self.skill_dim = 5
-        self.skill_dim = config['policy_args']['skill_dim']
-        self.skills = torch.eye(self.skill_dim, device=device) 
-        self.agents_skills = self.skills[torch.arange(total_agents, device=device) % self.skill_dim]   
         # LSTM
         if config['use_rnn']:
             n = vecenv.agents_per_batch
@@ -268,7 +263,6 @@ class PuffeRL:
                     env_id=env_id,
                     mask=mask,
                 )
-                state['skill'] = self.agents_skills[env_id]
 
                 if config['use_rnn']:
                     state['lstm_h'] = self.lstm_h[env_id.start]
@@ -277,6 +271,7 @@ class PuffeRL:
                 logits, value = self.policy.forward_eval(o_device, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
                 r = torch.clamp(r, -1, 1)
+
             profile('eval_copy', epoch)
             with torch.no_grad():
                 if config['use_rnn']:
@@ -348,94 +343,6 @@ class PuffeRL:
         anneal_beta = b0 + (1 - b0)*a*self.epoch/self.total_epochs
         self.ratio[:] = 1
 
-        def compute_rdiv(obs, b_idx):
-            # Re-compute rewards, based on divergence between \pi(\cdot \mid s, z_1) and \pi(\cdot \mid s, z_2) 
-            n_envs_steps = obs.shape[0] * obs.shape[1]
-            obs_flat = obs.reshape(-1, *self.vecenv.single_observation_space.shape)
-            n_actions = self.vecenv.single_action_space.n 
-            # We want probabilities over actions for each skill
-            all_p = torch.zeros((self.skill_dim, n_envs_steps, n_actions), device=device) # (skill_dim, B*TT, n_actions)
-            with torch.no_grad(): 
-                for z in range(self.skill_dim):
-                    skills = self.skills[z].unsqueeze(0).expand(n_envs_steps, -1) # (B*TT, skill_dim)
-                    state = dict(
-                        skill = skills
-                    )
-                    logits, _ = self.policy(obs_flat, state)
-                    p = torch.softmax(logits, dim=-1)
-                    all_p[z] = p
-            # We want TV between every pair of skills
-            skills_idx = self.agents_skills.unsqueeze(1).expand(
-                obs.shape[0], obs.shape[1], -1
-            )[b_idx].reshape(-1, self.skill_dim).argmax(dim=-1) # (B*TT,1) actual skill index for each env step in replay buffer
-            # Compute TV for all skills
-            tv_matrix = 0.5 * (all_p.unsqueeze(0) - all_p.unsqueeze(1)).abs().sum(dim=-1) # skill, skill, n_envs_steps
-
-            # We take only the rows we played in this batch 
-            r_div = tv_matrix[skills_idx, :, torch.arange(n_envs_steps, device=device)] # n_envs_steps, n_skills
-            # We want to put TV=0 when z=z'
-            mask_self = torch.zeros_like(r_div, dtype=torch.bool)
-            mask_self[torch.arange(n_envs_steps), skills_idx] = True 
-            # We want to endup with average TV to other skills 
-            r_div = r_div.masked_fill(mask_self, 0).sum(dim=-1) / (self.skill_dim - 1)
-            r_div = r_div.reshape(self.rewards.shape)
-            r_div = r_div * 2 - 1
-            shifted = torch.zeros_like(r_div)
-            shifted[:, 1:] = r_div[:, :-1] 
-            return shifted.detach()
-        
-        def compute_r_per_atn(obs, atn, b_idx):
-
-            atns_onehot = torch.nn.functional.one_hot(atn.reshape(-1), num_classes=self.vecenv.single_action_space.n) # (B*TT, n_actions)
-            skills = self.agents_skills.unsqueeze(1).expand(
-                obs.shape[0], obs.shape[1], -1
-            )[b_idx].reshape(-1, self.skill_dim) # (B*TT, skill_dim)
-            assert atns_onehot.shape[-1] == skills.shape[-1], "hardcoded for atn shape == skill_dim"
-            rewards = (atns_onehot * skills).sum(dim=-1).reshape(self.rewards.shape) # (B, TT)
-            rewards = rewards * 2 - 1
-            shifted = torch.zeros_like(rewards)
-            shifted[:, 1:] = rewards[:, :-1] 
-            return shifted.detach() 
-
-        def compute_tv_loss(obs, b_idx):
-            # Re-compute rewards, based on divergence between \pi(\cdot \mid s, z_1) and \pi(\cdot \mid s, z_2) 
-            n_envs_steps = obs.shape[0] * obs.shape[1]
-            obs_flat = obs.reshape(-1, *self.vecenv.single_observation_space.shape)
-            n_actions = self.vecenv.single_action_space.n 
-            # We want probabilities over actions for each skill
-            all_p = torch.zeros((self.skill_dim, n_envs_steps, n_actions), device=device) # (skill_dim, B*TT, n_actions)
-            for z in range(self.skill_dim):
-                skills = self.skills[z].unsqueeze(0).expand(n_envs_steps, -1) # (B*TT, skill_dim)
-                state = dict(
-                    skill = skills
-                )
-                logits, _ = self.policy(obs_flat, state)
-                p = torch.softmax(logits, dim=-1)
-                all_p[z] = p
-            # We want TV between every pair of skills
-            skills_idx = self.agents_skills.unsqueeze(1).expand(
-                self.observations.shape[0], self.observations.shape[1], -1
-            )[b_idx].reshape(-1, self.skill_dim).argmax(dim=-1) # (B*TT,) actual skill index for each env step in replay buffer
-            # Compute TV for all skills
-            # tv_matrix = 0.5 * ((all_p.unsqueeze(0) - all_p.unsqueeze(1)) **2).sum(dim=-1) # skill, skill, n_envs_steps
-            tv_matrix = 0.5 * (all_p.unsqueeze(0) - all_p.unsqueeze(1)).abs().sum(dim=-1) # skill, skill, n_envs_steps
-
-            # We take only the rows we played in this batch 
-            r_div = tv_matrix[skills_idx, :, torch.arange(n_envs_steps, device=device)] # n_envs_steps, n_skills
-            # We want to put TV=0 when z=z'
-            mask_self = torch.zeros_like(r_div, dtype=torch.bool)
-            mask_self[torch.arange(n_envs_steps), skills_idx] = True 
-            # We want to endup with average TV to other skills 
-            r_div = r_div.masked_fill(mask_self, 0).sum(dim=-1) / (self.skill_dim - 1)
-            r_div = r_div.reshape(obs.shape[:-1])
-            # r_div = r_div * 2 - 1
-
-            return r_div
-      
-        # self.rewards = compute_rdiv(self.observations, torch.arange(self.segments, device=device))
-        # self.rewards = compute_r_per_atn(self.observations, self.actions, torch.arange(self.segments, device=device))
-        
-
         for mb in range(self.total_minibatches):
             profile('train_misc', epoch)
             self.amp_context.__enter__()
@@ -464,22 +371,17 @@ class PuffeRL:
             mb_values = self.values[idx]
             mb_returns = advantages[idx] + mb_values
             mb_advantages = advantages[idx]
-            tv_loss = compute_tv_loss(mb_obs, idx)
-            mb_tv = tv_loss
 
             profile('train_forward', epoch)
             if not config['use_rnn']:
                 mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
-                skills = self.agents_skills[idx].unsqueeze(1).expand(self.minibatch_segments, shape[1], -1).reshape(-1, self.agents_skills.shape[-1])
-            else: 
-                skills = self.agents_skills[idx].unsqueeze(1).expand(mb_obs.shape[0], mb_obs.shape[1], -1).reshape(-1, self.agents_skills.shape[-1])
 
             state = dict(
                 action=mb_actions,
                 lstm_h=None,
                 lstm_c=None,
-                skill=skills
             )
+
             logits, newvalue = self.policy(mb_obs, state)
             actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
 
@@ -517,39 +419,14 @@ class PuffeRL:
 
             entropy_loss = entropy.mean()
 
-            # loss = pg_loss + config['vf_coef']*v_loss - config['ent_coef']*entropy_loss
-            loss = -mb_tv.mean()
+            loss = pg_loss + config['vf_coef']*v_loss - config['ent_coef']*entropy_loss
             self.amp_context.__enter__() # TODO: AMP needs some debugging
 
             # This breaks vloss clipping?
             self.values[idx] = newvalue.detach().float()
 
-            # Logging per skill
-            rewards_sk = dict()
-            for z in range(self.skill_dim):
-                rewards_sk[z] = mb_rewards[(self.agents_skills[idx]==self.skills[z]).all(dim=1)]
-                # losses[f'reward_sk{z}'] += rewards_sk[z].mean().item() / self.total_minibatches
-
-            with torch.no_grad():
-            #     obs = torch.ones(size=(1,1), device=device)
-            #     state = dict(
-            #         skill = self.skills[0].unsqueeze(0)
-            #     )
-            #     logits_0 = self.policy(obs, state)[0]
-            #     probs_0 = torch.softmax(logits_0, dim=-1)
-            #     state = dict(
-            #         skill = self.skills[1].unsqueeze(0)
-            #     )
-            #     logits_1 = self.policy(obs, state)[0]
-            #     probs_1 = torch.softmax(logits_1, dim=-1)
-            #     diff_logits = (logits_0 - logits_1).abs().mean()
-                s_weights = self.policy.encoder[0].weight[:, :-self.skill_dim].abs().mean()
-                z_weights = self.policy.encoder[0].weight[:, -self.skill_dim:].abs().mean()
-                z_bias = self.policy.encoder[0].bias[-self.skill_dim:].abs().mean()
-
             # Logging
             profile('train_misc', epoch)
-            losses['tv_loss'] += tv_loss.mean().item() / self.total_minibatches
             losses['policy_loss'] += pg_loss.item() / self.total_minibatches
             losses['value_loss'] += v_loss.item() / self.total_minibatches
             losses['entropy'] += entropy_loss.item() / self.total_minibatches
@@ -557,27 +434,12 @@ class PuffeRL:
             losses['approx_kl'] += approx_kl.item() / self.total_minibatches
             losses['clipfrac'] += clipfrac.item() / self.total_minibatches
             losses['importance'] += ratio.mean().item() / self.total_minibatches
-            losses['r_div_min'] += mb_rewards.min().item() / self.total_minibatches
-            losses['r_div_max'] += mb_rewards.max().item() / self.total_minibatches
-            losses['r_div_mean'] += mb_rewards.mean().item() / self.total_minibatches
-            losses['adv_mean'] += mb_advantages.mean().item() / self.total_minibatches
-            losses['adv_std'] += mb_advantages.std().item() / self.total_minibatches
-            # losses['sk0_left_prob'] += probs_0[0, 0].item() / self.total_minibatches
-            # losses['sk0_right_prob'] += probs_0[0, 1].item() / self.total_minibatches
-            # losses['sk1_left_prob'] += probs_1[0, 0].item() / self.total_minibatches
-            # losses['sk1_right_prob'] += probs_1[0, 1].item() / self.total_minibatches
-            # losses['diff_logits'] += diff_logits.item() / self.total_minibatches
-            losses['skill_weights'] += z_weights.item() / self.total_minibatches
-            losses['state_weights'] += s_weights.item() / self.total_minibatches
-            losses['skill_bias'] += z_bias.item() / self.total_minibatches
 
             # Learn on accumulated minibatches
             profile('learn', epoch)
             loss.backward()
-
             if (mb + 1) % self.accumulate_minibatches == 0:
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), config['max_grad_norm'])
-                losses['grad_norm'] += torch.nn.utils.clip_grad_norm_(self.policy.parameters(), float('inf')).item() / self.total_minibatches
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
@@ -1076,7 +938,7 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None, should_sto
     elif args['wandb']:
         logger = WandbLogger(args)
 
-    train_config = { **args['train'], 'env': env_name, 'policy_args': args['policy'] }
+    train_config = { **args['train'], 'env': env_name }
     pufferl = PuffeRL(train_config, vecenv, policy, logger)
 
     all_logs = []
@@ -1135,14 +997,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             lstm_h=torch.zeros(num_agents, policy.hidden_size, device=device),
             lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
         )
-    skills = torch.eye(args['policy']['skill_dim'], device=device)
-    skill = skills[4].unsqueeze(0).expand(num_agents, -1)
-    state['skill'] = skill
 
-    # for z in range(5):
-    #     state['skill'] = skills[z].unsqueeze(0).expand(num_agents, -1)
-    #     logits = policy.forward_eval(torch.as_tensor(ob).to(device), state)[0]
-    #     print(f'Skill {z} logits:', logits[0]) 
     frames = []
     while True:
         render = driver.render()
@@ -1291,6 +1146,7 @@ def load_policy(args, vecenv, env_name=''):
         policy = rnn_cls(vecenv.driver_env, policy, **args['rnn'])
 
     policy = policy.to(device)
+
     load_id = args['load_id']
     if load_id is not None:
         if args['neptune']:
