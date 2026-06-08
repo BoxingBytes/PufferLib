@@ -652,8 +652,8 @@ void add_hp(PredPrey *env, int agent_id, float hp) {
     agent->hp = MAX_HP;
   } else if (agent->hp <= 0) {
     agent->hp = 0;
-    int time_alive = env->tick - agent->start_tick;
-    float reward = (((float)time_alive-START_HP) / (float)MAX_TIMESTEPS) * env->reward_death_scale;
+    // int time_alive = env->tick - agent->start_tick;
+    float reward = REWARD_DEATH; //(((float)time_alive-START_HP) / (float)MAX_TIMESTEPS) * env->reward_death_scale;
     reward_agent(env, agent_id, reward);
     env->terminals[agent->id] = 1;
     add_agent_log(env, agent_id);    
@@ -673,7 +673,7 @@ void spawn_agent(PredPrey *env, int agent_id){
   agent->coldness = 0;
   agent->start_tick = env->tick;
   agent->food_amt = 0;
-  agent->wood_amt = 0;
+  agent->wood_amt = 100;
 
   // Spawn only in the house area
   int adr = 0;
@@ -764,7 +764,8 @@ void interact_food(PredPrey* env, int agent_id){
   env->food_count -= 1;
   env->agent_logs[agent_id].collects += 1;
   agent->anim = ANIM_INTERACT;
-  reward_agent(env, agent_id, env->reward_collect);
+  // TEST
+  // reward_agent(env, agent_id, env->reward_collect);
 };
 
 void interact_wood(PredPrey* env, int agent_id){
@@ -856,7 +857,8 @@ void handle_eat(PredPrey* env, int agent_id){
     return;
   }
   agent->food_amt -= 1;
-  add_hp(env, agent_id, HP_REWARD_FOOD);
+  // TEST
+  // add_hp(env, agent_id, HP_REWARD_FOOD);
   agent->anim = ANIM_EAT;
 };
 
@@ -876,6 +878,7 @@ void update_coldness(PredPrey* env, int agent_id){
 
   if (protected){
     agent->coldness = fmax(0, agent->coldness - COLDNESS_LOSS_PER_HOUR);
+    reward_agent(env, agent_id, 0.1);
   }
 };
 
@@ -926,6 +929,7 @@ void update_movement(PredPrey* env, int agent_id){
 }
 
 void apply_base_rewards(PredPrey* env, int agent_id){
+  // Base reward for being alive
   Agent* agent = &env->agents[agent_id];
   reward_agent(env, agent_id, env->timestep_reward);
   float reward_hp = (agent->hp / (float)MAX_HP) * env->hp_reward_scale;
@@ -970,7 +974,8 @@ void c_step(PredPrey *env) {
 
     if (env->tick % TICK_PER_HOUR == 0) {
       // Hourly HP decay
-      remove_hp(env, i, HP_LOSS_PER_HOUR);
+      // TEST without HP LOSS
+      // remove_hp(env, i, HP_LOSS_PER_HOUR);
     }
     
     // If agent survived long enough, reward and reset agent. 
@@ -1264,10 +1269,10 @@ void c_render(PredPrey *env) {
       int adr = flat_idx(env, r, c);
       int entity_id = env->pids[adr];
 
-      Vector2 pos = {
-          .x = c * TILE_SIZE_ENV,
-          .y = r * TILE_SIZE_ENV,
-      };
+      // Vector2 pos = {
+      //     .x = c * TILE_SIZE_ENV,
+      //     .y = r * TILE_SIZE_ENV,
+      // };
       if (entity_id != -1) {
         Agent *agent = &env->agents[entity_id];
         Animation animation = ANIMATIONS[agent->anim];
