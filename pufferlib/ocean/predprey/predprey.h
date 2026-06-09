@@ -675,9 +675,27 @@ void spawn_agent(PredPrey *env, int agent_id){
   agent->food_amt = 0;
   agent->wood_amt = 100;
 
-  // Spawn only in the house area
+  // TEST: Spawn directly on the fireplace
   int adr = 0;
   bool allocated = false;
+  for (int i = 0; i < env->biome_idxs.house_count; i++) {
+    int grid_idx = env->biome_idxs.house_idx[i];
+    if (env->items[grid_idx] == ITEM_FIREPLACE) {
+      adr = grid_idx;
+      if (is_obstacle(env, adr)){
+        break;
+      }
+      int r = adr / env->width;
+      int c = adr % env->width;
+      agent->r = r;
+      agent->c = c;
+      allocated = true;
+      break;
+    }
+  }
+  // Spawn only in the house area
+  // int adr = 0;
+  // bool allocated = false;
   while (!allocated){
     adr = env->biome_idxs.house_idx[rand() % env->biome_idxs.house_count];
     if (is_obstacle(env, adr)){
@@ -732,13 +750,13 @@ void c_reset(PredPrey *env) {
     }
   }
 
-  for (int i = 0; i < env->num_agents; i++) {
-    spawn_agent(env, i);
-  }
-
   env->food_count = 0;
   env->wood_count = 0;
   init_items(env);
+
+  for (int i = 0; i < env->num_agents; i++) {
+    spawn_agent(env, i);
+  }
 
   memset(env->observations, 0, env->num_agents * env->obs_size * sizeof(float));
   memset(env->terminals, 0, env->num_agents * sizeof(unsigned char));
