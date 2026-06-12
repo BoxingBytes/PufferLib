@@ -97,7 +97,9 @@ struct Log {
   float score;
   float episode_return;
   float steals;
-  float collects;
+  float food_collects;
+  float wood_collects;
+  float fireplace_lit;
   float n;
 };
 
@@ -111,6 +113,7 @@ struct Agent {
   int wood_amt;
   float hp;
   int start_tick;
+  int last_log_tick;
   unsigned char anim;
   unsigned char coldness;
 };
@@ -231,24 +234,33 @@ void add_log(PredPrey *env, Log *log) {
   env->log.steals += log->steals;
   env->log.episode_return += log->episode_return;
   env->log.score += log->score;
-  env->log.collects += log->collects;
+  env->log.food_collects += log->food_collects;
+  env->log.wood_collects += log->wood_collects;
+  env->log.fireplace_lit += log->fireplace_lit;
   env->log.n += 1;
 }
 
 void add_agent_log(PredPrey *env, int agent_id) {
-  int time_alive = env->tick - env->agents[agent_id].start_tick;
-  assert(time_alive > 0);
-  env->agent_logs[agent_id].score = time_alive;
-  env->agent_logs[agent_id].steals /= time_alive;
-  env->agent_logs[agent_id].collects /= time_alive;
-  add_log(env, &env->agent_logs[agent_id]);
-  
-  // //I don't fully reset because the agent might not be dead yet
-  // //So I still need to keep track of collect & steal counts
-  // //episode_returns will accumulate over life
-  // //score will be overwritten next time
-  // env->agent_logs[agent_id].steals *= time_alive;
-  // env->agent_logs[agent_id].collects *= time_alive;
+  Agent *agent = &env->agents[agent_id];
+  Log *agent_log = &env->agent_logs[agent_id];
+  int log_window = env->tick - agent->last_log_tick;
+
+  if (log_window <= 0) {
+    return;
+  }
+
+  Log sample = {0};
+  sample.score = env->tick - agent->start_tick; // Survival time as score
+  sample.episode_return = agent_log->episode_return; // Raw sum of rewards
+  sample.steals = agent_log->steals / (float)log_window; // Steals per tick
+  sample.food_collects = agent_log->food_collects / (float)log_window; // Food collects per tick
+  sample.wood_collects = agent_log->wood_collects / (float)log_window; // Wood collects per tick
+  sample.fireplace_lit = agent_log->fireplace_lit / (float)log_window; // Fireplace lit per tick
+
+  add_log(env, &sample);
+
+  *agent_log = (Log){0};
+  agent->last_log_tick = env->tick;
 }
 
 void save_terrain_to_file(PredPrey *env, const char *filename) {
@@ -335,7 +347,7 @@ void make_grid_from_scratch(PredPrey *env){
 void init_cenv(PredPrey *env) {
   env->agents = (Agent *)calloc(env->num_agents, sizeof(Agent));
   env->vision_window = 2 * env->vision + 1;
-  env->obs_size = (env->vision_window * env->vision_window) * MAX_CELL_OBS + 5;
+  env->obs_size = (env->vision_window * env->vision_window) * MAX_CELL_OBS + 7;
   // env->foods = allocate_foodlist(env->width * env->height);
   env->agent_logs = (Log *)calloc(env->num_agents, sizeof(Log));
   env->masks = (unsigned char *)calloc(env->num_agents, sizeof(unsigned char));
@@ -354,7 +366,7 @@ void init_cenv(PredPrey *env) {
 
 void allocate_cenv(PredPrey *env) {
   // Called by C stuff
-  int obs_size = ((2 * env->vision + 1) * (2 * env->vision + 1)) * MAX_CELL_OBS + 5;
+  int obs_size = ((2 * env->vision + 1) * (2 * env->vision + 1)) * MAX_CELL_OBS + 7;
   env->observations = (float *)calloc(env->num_agents * obs_size,
                                               sizeof(float));
   env->actions = (int *)calloc(env->num_agents, sizeof(unsigned int));
@@ -624,6 +636,8 @@ void compute_observations(PredPrey *env) {
     }
     //Agent also get its direction
     env->observations[obs_idx++] = agent->direction;
+    env->observations[obs_idx++] = (float)agent->r / (float)env->height;
+    env->observations[obs_idx++] = (float)agent->c / (float)env->width;
     env->observations[obs_idx++] = (float)env->is_fireplace_lit;
     env->observations[obs_idx++] = (float)env->fire_time_remaining/(float)MAX_FIRE_TIME;
     env->observations[obs_idx++] = (float)env->chest_food_amt/(float)MAX_CHEST_CAPACITY;
@@ -672,30 +686,13 @@ void spawn_agent(PredPrey *env, int agent_id){
   agent->hp = START_HP;
   agent->coldness = 0;
   agent->start_tick = env->tick;
+  agent->last_log_tick = env->tick;
   agent->food_amt = 0;
   agent->wood_amt = 100;
 
-  // TEST: Spawn directly on the fireplace
+  // Spawn only in the house area
   int adr = 0;
   bool allocated = false;
-  for (int i = 0; i < env->biome_idxs.house_count; i++) {
-    int grid_idx = env->biome_idxs.house_idx[i];
-    if (env->items[grid_idx] == ITEM_FIREPLACE) {
-      adr = grid_idx;
-      if (is_obstacle(env, adr)){
-        break;
-      }
-      int r = adr / env->width;
-      int c = adr % env->width;
-      agent->r = r;
-      agent->c = c;
-      allocated = true;
-      break;
-    }
-  }
-  // Spawn only in the house area
-  // int adr = 0;
-  // bool allocated = false;
   while (!allocated){
     adr = env->biome_idxs.house_idx[rand() % env->biome_idxs.house_count];
     if (is_obstacle(env, adr)){
@@ -738,6 +735,8 @@ void c_reset(PredPrey *env) {
   
   env->tick = 0;
   env->last_agent_dead_tick = 0;
+  env->is_fireplace_lit = false;
+  env->fire_time_remaining = 0;
 
   memset(env->agent_logs, 0, env->num_agents * sizeof(Log));
   env->log = (Log){0};
@@ -780,7 +779,7 @@ void interact_food(PredPrey* env, int agent_id){
   agent->food_amt += 1;
   env->items[curr_grid_idx] = EMPTY;
   env->food_count -= 1;
-  env->agent_logs[agent_id].collects += 1;
+  env->agent_logs[agent_id].food_collects += 1;
   agent->anim = ANIM_INTERACT;
   // TEST
   // reward_agent(env, agent_id, env->reward_collect);
@@ -796,7 +795,7 @@ void interact_wood(PredPrey* env, int agent_id){
   agent->wood_amt += 1;
   env->items[curr_grid_idx] = EMPTY;
   env->wood_count -= 1;
-  env->agent_logs[agent_id].collects += 1;
+  env->agent_logs[agent_id].wood_collects += 1;
   agent->anim = ANIM_INTERACT;
   reward_agent(env, agent_id, env->reward_collect);
 };
@@ -859,6 +858,7 @@ void interact_fireplace(PredPrey* env, int agent_id){
   env->fire_time_remaining += MAX_FIRE_TIME;
   agent->anim = ANIM_INTERACT;
   reward_agent(env, agent_id, env->reward_fireplace_lit);
+  env->agent_logs[agent_id].fireplace_lit += 1;
 };
 
 InteractFn interaction_fn[] = {
@@ -896,7 +896,7 @@ void update_coldness(PredPrey* env, int agent_id){
 
   if (protected){
     agent->coldness = fmax(0, agent->coldness - COLDNESS_LOSS_PER_HOUR);
-    reward_agent(env, agent_id, 0.1);
+    // reward_agent(env, agent_id, 0.1);
   }
 };
 
@@ -996,13 +996,13 @@ void c_step(PredPrey *env) {
       // remove_hp(env, i, HP_LOSS_PER_HOUR);
     }
     
-    // If agent survived long enough, reward and reset agent. 
-    if ((env->tick - env->agents[i].start_tick) >= MAX_TIMESTEPS && env->agents[i].hp > 0) {
-      remove_agent(env, i);
-      env->terminals[i] = 1;
-      reward_agent(env, i, env->reward_death_scale);
+    // Log agent every X steps
+    if ((env->tick - env->agents[i].start_tick) % 500 == 0){// MAX_TIMESTEPS && env->agents[i].hp > 0) {
+      // remove_agent(env, i);
+      // env->terminals[i] = 1;
+      // reward_agent(env, i, env->reward_death_scale);
       add_agent_log(env, i);
-      spawn_agent(env, i);
+      // spawn_agent(env, i);
       continue;
     }
 

@@ -25,6 +25,8 @@ static int my_log(PyObject* dict, Log* log) {
     assign_to_dict(dict, "score", log->score);
     assign_to_dict(dict, "episode_return", log->episode_return);
     assign_to_dict(dict, "steals", log->steals);
-    assign_to_dict(dict, "collects", log->collects);
+    assign_to_dict(dict, "food_collects", log->food_collects);
+    assign_to_dict(dict, "wood_collects", log->wood_collects);
+    assign_to_dict(dict, "fireplace_lit", log->fireplace_lit);
     return 0;
 }
