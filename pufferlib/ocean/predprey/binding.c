@@ -8,6 +8,7 @@ static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     env->height = unpack(kwargs, "height");
     env->num_agents = unpack(kwargs, "num_agents");
     env->vision = unpack(kwargs, "vision");
+    env->spawn_distance = unpack(kwargs, "spawn_distance");
     env->reward_death_scale = unpack(kwargs, "reward_death_scale");
     env->reward_eat = unpack(kwargs, "reward_eat");
     env->reward_collect = unpack(kwargs, "reward_collect");

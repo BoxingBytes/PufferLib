@@ -17,6 +17,7 @@ int main() {
       .timestep_reward = 0.0f,
       .hp_reward_scale = 0.0f,
       .held_food_reward_scale = 0.0f,
+      .spawn_distance = 2,
   };
   allocate_cenv(&env);
   c_reset(&env);
@@ -28,7 +29,8 @@ int main() {
   while (!WindowShouldClose()) {
 
     for (int i = 0; i < env.num_agents; i++) {
-        env.actions[i] = rand() % 7; 
+        // env.actions[i] = rand() % 7; 
+        env.actions[i] = NO_MOVE;
     }
     
     // User can take control of the first puffer
