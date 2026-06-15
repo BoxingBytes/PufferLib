@@ -469,17 +469,32 @@ void init_woods(PredPrey *env) {
 
 void init_items(PredPrey *env) {
   init_foods(env);
-  // Randomly place fireplace and chest in house area
-  bool allocated_fireplace = false;
-  while (!allocated_fireplace) {
-    int rand_idx = rand() % env->biome_idxs.house_count;
-    int grid_idx = env->biome_idxs.house_idx[rand_idx];
-    if (env->items[grid_idx] == EMPTY) {
-      env->items[grid_idx] = ITEM_FIREPLACE;
-      env->fireplace_idx = grid_idx;
-      allocated_fireplace = true;
+  // Fixed (deterministic) fireplace position: the house tile nearest the house
+  // centroid. Constant across resets and across all parallel envs, so the goal
+  // location is stable and spawn_distance is measured from a single reference.
+  int fr_sum = 0, fc_sum = 0;
+  for (int i = 0; i < env->biome_idxs.house_count; i++) {
+    int idx = env->biome_idxs.house_idx[i];
+    fr_sum += idx / env->width;
+    fc_sum += idx % env->width;
+  }
+  int center_r = fr_sum / env->biome_idxs.house_count;
+  int center_c = fc_sum / env->biome_idxs.house_count;
+  int fireplace_grid_idx = env->biome_idxs.house_idx[0];
+  int best_dist = -1;
+  for (int i = 0; i < env->biome_idxs.house_count; i++) {
+    int idx = env->biome_idxs.house_idx[i];
+    int dr = idx / env->width - center_r;
+    int dc = idx % env->width - center_c;
+    int d = dr * dr + dc * dc;
+    if (best_dist == -1 || d < best_dist) {
+      best_dist = d;
+      fireplace_grid_idx = idx;
     }
   }
+  env->items[fireplace_grid_idx] = ITEM_FIREPLACE;
+  env->fireplace_idx = fireplace_grid_idx;
+  // Chest is still placed randomly in the house (it does not affect the task).
   bool allocated_chest = false;
   while (!allocated_chest) {
     int rand_idx = rand() % env->biome_idxs.house_count;

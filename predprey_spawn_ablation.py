@@ -12,6 +12,7 @@ Safety nets:
 Usage:
     python predprey_spawn_ablation.py
     python predprey_spawn_ablation.py --max-distance 4 --total-timesteps 5_000_000
+    python predprey_spawn_ablation.py --min-distance 4 --max-distance 8   # run 4..8 only
     python predprey_spawn_ablation.py --force          # ignore existing results
 """
 import argparse
@@ -67,8 +68,10 @@ def run_one(distance, total_timesteps):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--min-distance', type=int, default=0,
+                        help='Lowest spawn distance to run (default 0).')
     parser.add_argument('--max-distance', type=int, default=4,
-                        help='Run distances 0..max-distance inclusive (default 4 -> 5 runs).')
+                        help='Highest spawn distance to run, inclusive (default 4).')
     parser.add_argument('--total-timesteps', type=str, default=None,
                         help='Override train.total_timesteps for each run (default: config value).')
     parser.add_argument('--out', type=str, default='predprey_spawn_ablation.json',
@@ -83,6 +86,10 @@ def main():
     # it falls back to the config-file defaults instead of choking on them.
     sys.argv = [sys.argv[0]]
 
+    if cli.min_distance > cli.max_distance:
+        parser.error(f'--min-distance ({cli.min_distance}) must be <= '
+                     f'--max-distance ({cli.max_distance}).')
+
     total_timesteps = None
     if cli.total_timesteps is not None:
         total_timesteps = int(cli.total_timesteps.replace('_', ''))
@@ -90,7 +97,7 @@ def main():
     results = {'env_name': ENV_NAME, 'score_key': SCORE_KEY, 'runs': {}} if cli.force \
         else load_results(cli.out)
 
-    for distance in range(cli.max_distance + 1):
+    for distance in range(cli.min_distance, cli.max_distance + 1):
         key = str(distance)
         if not cli.force and key in results['runs']:
             print(f'[ablation] spawn_distance={distance} already done '
