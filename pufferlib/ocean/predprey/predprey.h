@@ -201,7 +201,6 @@ struct PredPrey {
   int chest_food_amt;
   bool is_fireplace_lit;
   int fire_time_remaining;
-  int fireplace_grid_idx;
 };
 
 void init_biome_idx(PredPrey *env) {
@@ -348,7 +347,7 @@ void make_grid_from_scratch(PredPrey *env){
 void init_cenv(PredPrey *env) {
   env->agents = (Agent *)calloc(env->num_agents, sizeof(Agent));
   env->vision_window = 2 * env->vision + 1;
-  env->obs_size = 4; //(env->vision_window * env->vision_window) * MAX_CELL_OBS + 7;
+  env->obs_size = (env->vision_window * env->vision_window) * MAX_CELL_OBS + 7;
   // env->foods = allocate_foodlist(env->width * env->height);
   env->agent_logs = (Log *)calloc(env->num_agents, sizeof(Log));
   env->masks = (unsigned char *)calloc(env->num_agents, sizeof(unsigned char));
@@ -367,7 +366,7 @@ void init_cenv(PredPrey *env) {
 
 void allocate_cenv(PredPrey *env) {
   // Called by C stuff
-  int obs_size = 4;//((2 * env->vision + 1) * (2 * env->vision + 1)) * MAX_CELL_OBS + 7;
+  int obs_size = ((2 * env->vision + 1) * (2 * env->vision + 1)) * MAX_CELL_OBS + 7;
   env->observations = (float *)calloc(env->num_agents * obs_size,
                                               sizeof(float));
   env->actions = (int *)calloc(env->num_agents, sizeof(unsigned int));
@@ -476,7 +475,6 @@ void init_items(PredPrey *env) {
     if (env->items[grid_idx] == EMPTY) {
       env->items[grid_idx] = ITEM_FIREPLACE;
       allocated_fireplace = true;
-      env->fireplace_grid_idx = grid_idx;
     }
   }
   bool allocated_chest = false;
@@ -608,14 +606,42 @@ void compute_observations(PredPrey *env) {
       }
       continue;
     }
+    // int obs_offset = (i * env->obs_size);
+    int r_offset = agent->r - env->vision;
+    int c_offset = agent->c - env->vision;
+    for (int r = 0; r < env->vision_window; r++) {
+      for (int c = 0; c < env->vision_window; c++) {
+        int grid_idx = flat_idx(env,r_offset + r, c_offset + c);
+        unsigned char item_idx = env->items[grid_idx];
+        short entity_id = env->pids[grid_idx];
+
+        // First obs is terrain
+        env->observations[obs_idx++] = (float)env->terrain[grid_idx];
+        // Second is item 
+        env->observations[obs_idx++] = (float)item_idx;
+        // Thirds is entity id 
+        env->observations[obs_idx++] = (float)entity_id;
+        float hp_norm = 0.0f;
+        float food_norm = 0.0f;
+        if (entity_id != -1) {
+            Agent *grid_agent = &env->agents[entity_id]; 
+            hp_norm = grid_agent->hp / (float)MAX_HP;
+            food_norm = grid_agent->food_amt / (float)MAX_INVENTORY_ITEM;
+        }
+
+        env->observations[obs_idx++] = hp_norm;
+        env->observations[obs_idx++] = food_norm;
+
+      } 
+    }
+    //Agent also get its direction
+    env->observations[obs_idx++] = agent->direction;
+    env->observations[obs_idx++] = (float)agent->r / (float)env->height;
+    env->observations[obs_idx++] = (float)agent->c / (float)env->width;
     env->observations[obs_idx++] = (float)env->is_fireplace_lit;
-    int fireplace_r = env->fireplace_grid_idx / env->width;
-    int fireplace_c = env->fireplace_grid_idx % env->width;
-    int relative_r = agent->r - fireplace_r;
-    int relative_c = agent->c - fireplace_c;
-    env->observations[obs_idx++] = (float)relative_r;
-    env->observations[obs_idx++] = (float)relative_c;
-    env->observations[obs_idx++] = (float)agent->wood_amt / (float)MAX_INVENTORY_ITEM;
+    env->observations[obs_idx++] = (float)env->fire_time_remaining/(float)MAX_FIRE_TIME;
+    env->observations[obs_idx++] = (float)env->chest_food_amt/(float)MAX_CHEST_CAPACITY;
+    env->observations[obs_idx++] = (float)agent->coldness/(float)MAX_COLDNESS;
   }
 }
 
@@ -711,7 +737,6 @@ void c_reset(PredPrey *env) {
   env->last_agent_dead_tick = 0;
   env->is_fireplace_lit = false;
   env->fire_time_remaining = 0;
-  env->fireplace_grid_idx = -1;
 
   memset(env->agent_logs, 0, env->num_agents * sizeof(Log));
   env->log = (Log){0};
