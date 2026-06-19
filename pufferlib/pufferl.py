@@ -54,6 +54,87 @@ from torch.utils.cpp_extension import (
 # and can find CUDA or HIP in the system
 ADVANTAGE_CUDA = bool(CUDA_HOME or ROCM_HOME)
 
+import torch
+import torch.nn as nn
+
+
+class RunningMeanStd:
+    '''Running mean/variance (parallel/Welford update) used to normalize the
+    observations fed to the RND networks, and to track the std of the intrinsic
+    rewards. All state lives on `device` so it composes with GPU rollouts.'''
+    def __init__(self, dim, eps=1e-4, device='cpu'):
+        self.mean = torch.zeros(dim, device=device)
+        self.var = torch.ones(dim, device=device)
+        self.count = eps
+
+    def update(self, x):
+        # Accepts any shape [..., dim]; flattens leading dims to a batch.
+        x = x.reshape(-1, x.shape[-1]).float()
+        bmean, bvar, bcount = x.mean(0), x.var(0, unbiased=False), x.shape[0]
+        delta = bmean - self.mean
+        tot = self.count + bcount
+        self.mean = self.mean + delta * bcount / tot
+        m_a, m_b = self.var * self.count, bvar * bcount
+        self.var = (m_a + m_b + delta.pow(2) * self.count * bcount / tot) / tot
+        self.count = tot
+
+    def normalize(self, x):
+        return torch.clamp((x - self.mean) / torch.sqrt(self.var + 1e-8), -5, 5)
+
+
+class RNDModel(nn.Module):
+    def __init__(self, obs_dim, embed_dim=256, device="cpu"):
+        super().__init__()
+
+        # Target: shallow random projection, frozen. NO activation on output.
+        self.target = nn.Sequential(
+            nn.Linear(obs_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, embed_dim),
+        )
+
+        # Predictor: deeper + wider so the target lies inside its model class.
+        self.predictor = nn.Sequential(
+            nn.Linear(obs_dim, 512),
+            nn.ReLU(),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, embed_dim),
+        )
+
+        # Orthogonal init (gain sqrt(2) for ReLU stacks) -> good feature spread.
+        for net in (self.target, self.predictor):
+            for layer in net:
+                if isinstance(layer, nn.Linear):
+                    nn.init.orthogonal_(layer.weight, gain=2 ** 0.5)
+                    nn.init.zeros_(layer.bias)
+
+        # Freeze the target: no grads + never handed to the optimizer.
+        for p in self.target.parameters():
+            p.requires_grad_(False)
+        self.target.eval()
+
+        self.to(device)
+
+    def forward(self, obs):
+        # obs MUST be normalized (running mean/std, clipped to [-5, 5]) first.
+        with torch.no_grad():
+            target_feat = self.target(obs)
+        pred_feat = self.predictor(obs)
+        return pred_feat, target_feat
+
+    def intrinsic_reward(self, obs):
+        # detached: used as a reward, no graph needed
+        pred_feat, target_feat = self.forward(obs)
+        return (pred_feat - target_feat).pow(2).mean(dim=-1).detach()
+
+    def distillation_loss(self, obs):
+        # grad flows only through the predictor (target is frozen)
+        pred_feat, target_feat = self.forward(obs)
+        return (pred_feat - target_feat).pow(2).mean()
+    
 class PuffeRL:
     def __init__(self, config, vecenv, policy, logger=None):
         # Backend perf optimization
@@ -145,10 +226,40 @@ class PuffeRL:
             self.policy.forward_eval = torch.compile(policy, mode=config['compile_mode'])
             pufferlib.pytorch.sample_logits = torch.compile(pufferlib.pytorch.sample_logits, mode=config['compile_mode'])
 
-        # Optimizer
+        # RND (Random Network Distillation) intrinsic-reward exploration.
+        # Gated behind `use_rnd` so every other environment is unaffected.
+        self.use_rnd = config.get('use_rnd', False)
+        if self.use_rnd:
+            self.rnd_obs_dim = int(np.prod(obs_space.shape))
+            self.rnd = RNDModel(self.rnd_obs_dim, device=device)
+            # Observation normalization for the RND nets (frozen target requires it)
+            self.obs_rms = RunningMeanStd(self.rnd_obs_dim, device=device)
+            # Running std of the intrinsic reward, to keep it on a stable scale
+            self.int_reward_rms = RunningMeanStd(1, device=device)
+            self.rnd_initialized = False  # first rollout is a warmup (obs stats only)
+
+            # Reward-stream coefficients and the (typically lower) intrinsic discount
+            self.rnd_int_coef = config.get('rnd_int_coef', 1.0)
+            self.rnd_ext_coef = config.get('rnd_ext_coef', 1.0)
+            self.rnd_gamma = config.get('rnd_gamma', 0.99)
+            self.rnd_coef = config.get('rnd_coef', 1.0)  # distillation loss weight
+
+            # Intrinsic reward stream + its own value estimate buffer.
+            self.values_int = torch.zeros(segments, horizon, device=device)
+            self.intrinsic_rewards = torch.zeros(segments, horizon, device=device)
+            # Overridden dones: intrinsic returns are non-episodic, so advantages
+            # bootstrap across episode terminations (see paper, Section 2.3).
+            self.rnd_terminals = torch.zeros(segments, horizon, device=device)
+
+        # Optimizer (the RND predictor is trained alongside the policy in the
+        # same optimizer; the target net is frozen and never handed in)
+        opt_params = list(self.policy.parameters())
+        if self.use_rnd:
+            opt_params += list(self.rnd.predictor.parameters())
+        self.opt_params = opt_params
         if config['optimizer'] == 'adam':
             optimizer = torch.optim.Adam(
-                self.policy.parameters(),
+                opt_params,
                 lr=config['learning_rate'],
                 betas=(config['adam_beta1'], config['adam_beta2']),
                 eps=config['adam_eps'],
@@ -166,7 +277,7 @@ class PuffeRL:
             # heavyball_momentum=True introduced in heavyball 2.1.1
             # recovers heavyball-1.7.2 behaviour - previously swept hyperparameters work well
             optimizer = ForeachMuon(
-                self.policy.parameters(),
+                opt_params,
                 lr=config['learning_rate'],
                 betas=(config['adam_beta1'], config['adam_beta2']),
                 eps=config['adam_eps'],
@@ -268,7 +379,9 @@ class PuffeRL:
                     state['lstm_h'] = self.lstm_h[env_id.start]
                     state['lstm_c'] = self.lstm_c[env_id.start]
 
-                logits, value = self.policy.forward_eval(o_device, state)
+                out = self.policy.forward_eval(o_device, state)
+                logits, value = out[0], out[1]
+                value_int = out[2] if len(out) > 2 else None
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
                 r = torch.clamp(r, -1, 1)
 
@@ -292,6 +405,8 @@ class PuffeRL:
                 self.rewards[batch_rows, l] = r
                 self.terminals[batch_rows, l] = d.float()
                 self.values[batch_rows, l] = value.flatten()
+                if self.use_rnd and value_int is not None:
+                    self.values_int[batch_rows, l] = value_int.flatten()
 
                 # Note: We are not yet handling masks in this version
                 self.ep_lengths[env_id] += 1
@@ -343,6 +458,33 @@ class PuffeRL:
         anneal_beta = b0 + (1 - b0)*a*self.epoch/self.total_epochs
         self.ratio[:] = 1
 
+        # ---- RND: observation stats + intrinsic reward for this rollout ----
+        # Computed once per rollout (before the minibatch loop) with the current
+        # predictor; the intrinsic *advantages* are then recomputed every
+        # minibatch below (since values_int gets updated as we learn).
+        inject_intrinsic = False
+        if self.use_rnd:
+            flat_obs = self.observations.reshape(-1, self.rnd_obs_dim).to(device).float()
+            # Keep the obs-normalization stats fresh with the new rollout.
+            self.obs_rms.update(flat_obs)
+
+            if not self.rnd_initialized:
+                # First rollout is a pure warmup: seed the obs-normalization
+                # stats only, do not inject any intrinsic reward yet.
+                self.rnd_initialized = True
+                self.intrinsic_rewards.zero_()
+                self.msg = 'RND warmup: initialized observation normalization'
+            else:
+                inject_intrinsic = True
+                with torch.no_grad():
+                    norm_obs = self.obs_rms.normalize(flat_obs)
+                    int_rew = self.rnd.intrinsic_reward(norm_obs).reshape(self.values.shape)
+                # Update the intrinsic-reward running std with the new batch,
+                # then normalize by it (paper Section 2.4: divide by running std).
+                self.int_reward_rms.update(int_rew.reshape(-1, 1))
+                self.intrinsic_rewards = int_rew / torch.sqrt(self.int_reward_rms.var + 1e-8)
+                losses['intrinsic_reward_mean'] = self.intrinsic_rewards.mean().item()
+                
         for mb in range(self.total_minibatches):
             profile('train_misc', epoch)
             self.amp_context.__enter__()
@@ -353,8 +495,22 @@ class PuffeRL:
                 self.terminals, self.ratio, advantages, config['gamma'],
                 config['gae_lambda'], config['vtrace_rho_clip'], config['vtrace_c_clip'])
 
-            # Prioritize experience by advantage magnitude
-            adv = advantages.abs().sum(axis=1)
+            # Intrinsic advantages: separate value head, separate (lower)
+            # discount, and overridden (always-zero) dones so the return is
+            # non-episodic and bootstraps across episode boundaries.
+            if inject_intrinsic:
+                advantages_int = torch.zeros(shape, device=device)
+                advantages_int = compute_puff_advantage(self.values_int,
+                    self.intrinsic_rewards, self.rnd_terminals, self.ratio,
+                    advantages_int, self.rnd_gamma, config['gae_lambda'],
+                    config['vtrace_rho_clip'], config['vtrace_c_clip'])
+                combined_advantages = (self.rnd_ext_coef * advantages
+                    + self.rnd_int_coef * advantages_int)
+            else:
+                combined_advantages = advantages
+
+            # Prioritize experience by (combined) advantage magnitude
+            adv = combined_advantages.abs().sum(axis=1)
             prio_weights = torch.nan_to_num(adv**a, 0, 0, 0)
             prio_probs = (prio_weights + 1e-6)/(prio_weights.sum() + 1e-6)
             idx = torch.multinomial(prio_probs, self.minibatch_segments)
@@ -370,7 +526,11 @@ class PuffeRL:
             mb_ratio = self.ratio[idx]
             mb_values = self.values[idx]
             mb_returns = advantages[idx] + mb_values
-            mb_advantages = advantages[idx]
+            # Policy gradient uses the combined (extrinsic + intrinsic) advantage
+            mb_advantages = combined_advantages[idx]
+            if inject_intrinsic:
+                mb_values_int = self.values_int[idx]
+                mb_returns_int = advantages_int[idx] + mb_values_int
 
             profile('train_forward', epoch)
             if not config['use_rnn']:
@@ -382,7 +542,9 @@ class PuffeRL:
                 lstm_c=None,
             )
 
-            logits, newvalue = self.policy(mb_obs, state)
+            out = self.policy(mb_obs, state)
+            logits, newvalue = out[0], out[1]
+            newvalue_int = out[2] if len(out) > 2 else None
             actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
 
             profile('train_misc', epoch)
@@ -420,6 +582,29 @@ class PuffeRL:
             entropy_loss = entropy.mean()
 
             loss = pg_loss + config['vf_coef']*v_loss - config['ent_coef']*entropy_loss
+
+            # RND: intrinsic value-head loss + predictor distillation loss.
+            if self.use_rnd:
+                # Train the predictor to match the frozen target on normalized
+                # observations (grad flows only through the predictor).
+                rnd_obs = mb_obs.reshape(-1, self.rnd_obs_dim).to(device).float()
+                with torch.no_grad():
+                    rnd_obs = self.obs_rms.normalize(rnd_obs)
+                rnd_loss = self.rnd.distillation_loss(rnd_obs)
+                loss = loss + self.rnd_coef*rnd_loss
+                losses['rnd_loss'] += rnd_loss.item() / self.total_minibatches
+
+            if inject_intrinsic and newvalue_int is not None:
+                newvalue_int = newvalue_int.view(mb_returns_int.shape)
+                vi_clipped = mb_values_int + torch.clamp(
+                    newvalue_int - mb_values_int, -vf_clip, vf_clip)
+                vi_loss_unclipped = (newvalue_int - mb_returns_int) ** 2
+                vi_loss_clipped = (vi_clipped - mb_returns_int) ** 2
+                v_loss_int = 0.5*torch.max(vi_loss_unclipped, vi_loss_clipped).mean()
+                loss = loss + config['vf_coef']*v_loss_int
+                losses['value_int_loss'] += v_loss_int.item() / self.total_minibatches
+                self.values_int[idx] = newvalue_int.detach().float()
+
             self.amp_context.__enter__() # TODO: AMP needs some debugging
 
             # This breaks vloss clipping?
@@ -439,7 +624,7 @@ class PuffeRL:
             profile('learn', epoch)
             loss.backward()
             if (mb + 1) % self.accumulate_minibatches == 0:
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), config['max_grad_norm'])
+                torch.nn.utils.clip_grad_norm_(self.opt_params, config['max_grad_norm'])
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
@@ -1018,7 +1203,8 @@ def eval(env_name, args=None, vecenv=None, policy=None):
 
         with torch.no_grad():
             ob = torch.as_tensor(ob).to(device)
-            logits, value = policy.forward_eval(ob, state)
+            out = policy.forward_eval(ob, state)
+            logits, value = out[0], out[1]
             action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
             action = action.cpu().numpy().reshape(vecenv.action_space.shape)
 

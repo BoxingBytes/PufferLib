@@ -62,10 +62,17 @@ class Default(nn.Module):
         self.value = pufferlib.pytorch.layer_init(
             nn.Linear(hidden_size, 1), std=1)
 
+        # Second (intrinsic) value head for RND. Shares the policy trunk and is
+        # just an extra linear head off the same hidden state - cheap, and the
+        # standard way to fit a separate intrinsic return stream (Burda et al.
+        # 2018 use two value heads, not two networks).
+        self.value_int = pufferlib.pytorch.layer_init(
+            nn.Linear(hidden_size, 1), std=1)
+
     def forward_eval(self, observations, state=None):
         hidden = self.encode_observations(observations, state=state)
-        logits, values = self.decode_actions(hidden)
-        return logits, values
+        logits, values, values_int = self.decode_actions(hidden)
+        return logits, values, values_int
 
     def forward(self, observations, state=None):
         return self.forward_eval(observations, state)
@@ -95,7 +102,8 @@ class Default(nn.Module):
             logits = self.decoder(hidden)
 
         values = self.value(hidden)
-        return logits, values
+        values_int = self.value_int(hidden)
+        return logits, values, values_int
 
 class LSTMWrapper(nn.Module):
     def __init__(self, env, policy, input_size=128, hidden_size=128):
@@ -149,8 +157,13 @@ class LSTMWrapper(nn.Module):
         state['hidden'] = hidden
         state['lstm_h'] = hidden
         state['lstm_c'] = c
-        logits, values = self.policy.decode_actions(hidden)
-        return logits, values
+        # decode_actions may return (logits, values) or (logits, values,
+        # values_int) depending on whether the wrapped policy has an intrinsic
+        # value head (RND). Stay tolerant of both.
+        out = self.policy.decode_actions(hidden)
+        logits, values = out[0], out[1]
+        values_int = out[2] if len(out) > 2 else None
+        return logits, values, values_int
 
     def forward(self, observations, state):
         '''Forward function for training. Uses LSTM for fast time-batching'''
@@ -191,13 +204,15 @@ class LSTMWrapper(nn.Module):
         hidden = hidden.transpose(0, 1)
 
         flat_hidden = hidden.reshape(B*TT, self.hidden_size)
-        logits, values = self.policy.decode_actions(flat_hidden)
+        out = self.policy.decode_actions(flat_hidden)
+        logits, values = out[0], out[1]
         values = values.reshape(B, TT)
+        values_int = out[2].reshape(B, TT) if len(out) > 2 and out[2] is not None else None
         #state.batch_logits = logits.reshape(B, TT, -1)
         state['hidden'] = hidden
         state['lstm_h'] = lstm_h.detach()
         state['lstm_c'] = lstm_c.detach()
-        return logits, values
+        return logits, values, values_int
 
 class Convolutional(nn.Module):
     def __init__(self, env, *args, framestack, flat_size,
