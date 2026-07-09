@@ -469,31 +469,41 @@ void init_woods(PredPrey *env) {
 
 void init_items(PredPrey *env) {
   init_foods(env);
-  // Fixed (deterministic) fireplace position: the house tile nearest the house
-  // centroid. Constant across resets and across all parallel envs, so the goal
-  // location is stable and spawn_distance is measured from a single reference.
-  int fr_sum = 0, fc_sum = 0;
-  for (int i = 0; i < env->biome_idxs.house_count; i++) {
-    int idx = env->biome_idxs.house_idx[i];
-    fr_sum += idx / env->width;
-    fc_sum += idx % env->width;
-  }
-  int center_r = fr_sum / env->biome_idxs.house_count;
-  int center_c = fc_sum / env->biome_idxs.house_count;
-  int fireplace_grid_idx = env->biome_idxs.house_idx[0];
-  int best_dist = -1;
-  for (int i = 0; i < env->biome_idxs.house_count; i++) {
-    int idx = env->biome_idxs.house_idx[i];
-    int dr = idx / env->width - center_r;
-    int dc = idx % env->width - center_c;
-    int d = dr * dr + dc * dc;
-    if (best_dist == -1 || d < best_dist) {
-      best_dist = d;
-      fireplace_grid_idx = idx;
+  // // Fixed (deterministic) fireplace position: the house tile nearest the house
+  // // centroid. Constant across resets and across all parallel envs, so the goal
+  // // location is stable and spawn_distance is measured from a single reference.
+  // int fr_sum = 0, fc_sum = 0;
+  // for (int i = 0; i < env->biome_idxs.house_count; i++) {
+  //   int idx = env->biome_idxs.house_idx[i];
+  //   fr_sum += idx / env->width;
+  //   fc_sum += idx % env->width;
+  // }
+  // int center_r = fr_sum / env->biome_idxs.house_count;
+  // int center_c = fc_sum / env->biome_idxs.house_count;
+  // int fireplace_grid_idx = env->biome_idxs.house_idx[0];
+  // int best_dist = -1;
+  // for (int i = 0; i < env->biome_idxs.house_count; i++) {
+  //   int idx = env->biome_idxs.house_idx[i];
+  //   int dr = idx / env->width - center_r;
+  //   int dc = idx % env->width - center_c;
+  //   int d = dr * dr + dc * dc;
+  //   if (best_dist == -1 || d < best_dist) {
+  //     best_dist = d;
+  //     fireplace_grid_idx = idx;
+  //   }
+  // }
+  bool allocated_fireplace = false;
+  while (!allocated_fireplace) {
+    int rand_idx = rand() % env->biome_idxs.house_count;
+    int grid_idx = env->biome_idxs.house_idx[rand_idx];
+    if (env->items[grid_idx] == EMPTY) {
+      env->items[grid_idx] = ITEM_FIREPLACE;
+      allocated_fireplace = true;
+      env->fireplace_idx = grid_idx;
     }
   }
-  env->items[fireplace_grid_idx] = ITEM_FIREPLACE;
-  env->fireplace_idx = fireplace_grid_idx;
+  // env->items[fireplace_grid_idx] = ITEM_FIREPLACE;
+  // env->fireplace_idx = fireplace_grid_idx;
   // Chest is still placed randomly in the house (it does not affect the task).
   bool allocated_chest = false;
   while (!allocated_chest) {
@@ -708,97 +718,97 @@ void spawn_agent(PredPrey *env, int agent_id){
   agent->food_amt = 0;
   agent->wood_amt = 100;
 
-  // // Spawn the agent at exactly spawn_distance movement-steps from the fireplace.
-  // // We BFS outward from the fireplace over free (non-obstacle) tiles so that the
-  // // returned distance is the true number of steps the agent would walk, and any
-  // // candidate tile is guaranteed reachable. spawn_distance == 0 -> on the fireplace.
-  // int n = env->width * env->height;
-  // int *dist = (int *)malloc(n * sizeof(int));
-  // int *queue = (int *)malloc(n * sizeof(int));
-  // int *cands = (int *)malloc(n * sizeof(int));
-  // for (int i = 0; i < n; i++) {
-  //   dist[i] = -1;
-  // }
+  // Spawn the agent at exactly spawn_distance movement-steps from the fireplace.
+  // We BFS outward from the fireplace over free (non-obstacle) tiles so that the
+  // returned distance is the true number of steps the agent would walk, and any
+  // candidate tile is guaranteed reachable. spawn_distance == 0 -> on the fireplace.
+  int n = env->width * env->height;
+  int *dist = (int *)malloc(n * sizeof(int));
+  int *queue = (int *)malloc(n * sizeof(int));
+  int *cands = (int *)malloc(n * sizeof(int));
+  for (int i = 0; i < n; i++) {
+    dist[i] = -1;
+  }
 
-  // int bfs_dr[4] = { 1, -1, 0, 0 };
-  // int bfs_dc[4] = { 0, 0, 1, -1 };
-  // int head = 0, tail = 0;
-  // int fp = env->fireplace_idx;
-  // dist[fp] = 0;
-  // queue[tail++] = fp;
-  // while (head < tail) {
-  //   int cur = queue[head++];
-  //   int cr = cur / env->width;
-  //   int cc = cur % env->width;
-  //   for (int d = 0; d < 4; d++) {
-  //     int nr = cr + bfs_dr[d];
-  //     int nc = cc + bfs_dc[d];
-  //     if (nr < 0 || nr >= env->height || nc < 0 || nc >= env->width) {
-  //       continue;
-  //     }
-  //     int nidx = flat_idx(env, nr, nc);
-  //     if (dist[nidx] != -1) {
-  //       continue;
-  //     }
-  //     // Only step onto free tiles, so BFS only reaches reachable spawn positions.
-  //     if (is_obstacle(env, nidx)) {
-  //       continue;
-  //     }
-  //     dist[nidx] = dist[cur] + 1;
-  //     queue[tail++] = nidx;
-  //   }
-  // }
-
-  // // Collect free tiles at exactly spawn_distance steps from the fireplace.
-  // int ccount = 0;
-  // for (int i = 0; i < n; i++) {
-  //   if (dist[i] == env->spawn_distance) {
-  //     cands[ccount++] = i;
-  //   }
-  // }
-
-  // // Fallback: if no reachable tile is at exactly spawn_distance (e.g. distance
-  // // larger than the reachable area), pick the reachable tile(s) whose distance
-  // // is closest to the requested spawn_distance.
-  // if (ccount == 0) {
-  //   int best_diff = -1;
-  //   for (int i = 0; i < n; i++) {
-  //     if (dist[i] < 0) {
-  //       continue;
-  //     }
-  //     int diff = abs(dist[i] - env->spawn_distance);
-  //     if (best_diff == -1 || diff < best_diff) {
-  //       best_diff = diff;
-  //     }
-  //   }
-  //   for (int i = 0; i < n; i++) {
-  //     if (dist[i] >= 0 && abs(dist[i] - env->spawn_distance) == best_diff) {
-  //       cands[ccount++] = i;
-  //     }
-  //   }
-  // }
-
-  // assert(ccount > 0);
-  // int adr = cands[rand() % ccount];
-  // agent->r = adr / env->width;
-  // agent->c = adr % env->width;
-
-  // free(dist);
-  // free(queue);
-  // free(cands);
-
-  // Just randomly spawn agent within house tiles 
-  bool allocated = false;
-  int adr = 0;
-  while (!allocated){
-    int rand_idx = rand() % env->biome_idxs.house_count;
-    adr = env->biome_idxs.house_idx[rand_idx];
-    if (!is_obstacle(env, adr)){
-      agent->r = adr / env->width;
-      agent->c = adr % env->width;
-      allocated = true;
+  int bfs_dr[4] = { 1, -1, 0, 0 };
+  int bfs_dc[4] = { 0, 0, 1, -1 };
+  int head = 0, tail = 0;
+  int fp = env->fireplace_idx;
+  dist[fp] = 0;
+  queue[tail++] = fp;
+  while (head < tail) {
+    int cur = queue[head++];
+    int cr = cur / env->width;
+    int cc = cur % env->width;
+    for (int d = 0; d < 4; d++) {
+      int nr = cr + bfs_dr[d];
+      int nc = cc + bfs_dc[d];
+      if (nr < 0 || nr >= env->height || nc < 0 || nc >= env->width) {
+        continue;
+      }
+      int nidx = flat_idx(env, nr, nc);
+      if (dist[nidx] != -1) {
+        continue;
+      }
+      // Only step onto free tiles, so BFS only reaches reachable spawn positions.
+      if (is_obstacle(env, nidx)) {
+        continue;
+      }
+      dist[nidx] = dist[cur] + 1;
+      queue[tail++] = nidx;
     }
   }
+
+  // Collect free tiles at exactly spawn_distance steps from the fireplace.
+  int ccount = 0;
+  for (int i = 0; i < n; i++) {
+    if (dist[i] == env->spawn_distance) {
+      cands[ccount++] = i;
+    }
+  }
+
+  // Fallback: if no reachable tile is at exactly spawn_distance (e.g. distance
+  // larger than the reachable area), pick the reachable tile(s) whose distance
+  // is closest to the requested spawn_distance.
+  if (ccount == 0) {
+    int best_diff = -1;
+    for (int i = 0; i < n; i++) {
+      if (dist[i] < 0) {
+        continue;
+      }
+      int diff = abs(dist[i] - env->spawn_distance);
+      if (best_diff == -1 || diff < best_diff) {
+        best_diff = diff;
+      }
+    }
+    for (int i = 0; i < n; i++) {
+      if (dist[i] >= 0 && abs(dist[i] - env->spawn_distance) == best_diff) {
+        cands[ccount++] = i;
+      }
+    }
+  }
+
+  assert(ccount > 0);
+  int adr = cands[rand() % ccount];
+  agent->r = adr / env->width;
+  agent->c = adr % env->width;
+
+  free(dist);
+  free(queue);
+  free(cands);
+
+  // // Just randomly spawn agent within house tiles 
+  // bool allocated = false;
+  // int adr = 0;
+  // while (!allocated){
+  //   int rand_idx = rand() % env->biome_idxs.house_count;
+  //   adr = env->biome_idxs.house_idx[rand_idx];
+  //   if (!is_obstacle(env, adr)){
+  //     agent->r = adr / env->width;
+  //     agent->c = adr % env->width;
+  //     allocated = true;
+  //   }
+  // }
   assert(env->pids[adr] == -1);
   env->pids[adr] = agent->id;
   env->agent_logs[agent_id] = (Log){0};
