@@ -1324,7 +1324,8 @@ def load_policy(args, vecenv, env_name=''):
 
     device = args['train']['device']
     policy_cls = getattr(env_module.torch, args['policy_name'])
-    policy = policy_cls(vecenv.driver_env, **args['policy'])
+    pol_args = {**args['policy'], **args['env']}
+    policy = policy_cls(vecenv.driver_env, **pol_args)
 
     rnn_name = args['rnn_name']
     if rnn_name is not None:

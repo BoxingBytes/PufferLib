@@ -53,35 +53,22 @@ class Boids(nn.Module):
         return action, value
 
 class PredPrey(nn.Module):
-    def __init__(self, env, cnn_channels=32, hidden_size=128, **kwargs):
+    def __init__(self, env, hidden_size=128, **kwargs):
         super().__init__()
         self.hidden_size = hidden_size
-        self.cnn_channels = cnn_channels
         self.is_continuous = False
 
-        self.cont_encoder = nn.Sequential(
-            pufferlib.pytorch.layer_init(nn.Linear(7, hidden_size)),
-            nn.GELU(),
+        self.moore_area = (kwargs['vision']*2+1)**2
+        self.num_agents = kwargs['num_agents']
+        # N_TERRAIN = 4, N_ITEM = 6, +1 is for empty entity tile
+        self.one_hot_shape = self.moore_area * (10 + self.num_agents + 1)
+        # 7 cont features & 2 more cont channels (hp & food)
+        self.input_shape = self.one_hot_shape + 7 + self.moore_area * 2
+        self.encoder = nn.Sequential(
+            pufferlib.pytorch.layer_init(nn.Linear(self.input_shape, hidden_size)),
+            nn.ReLU(),
             pufferlib.pytorch.layer_init(nn.Linear(hidden_size, hidden_size)),
-        )
-        # self.entity_emb = nn.Embedding(100, hidden_size)
-        # self.terrain_emb = nn.Embedding(4, hidden_size)
-        # self.object_emb = nn.Embedding(6, hidden_size)
-
-        self.conv_encoder = nn.Sequential(
-            pufferlib.pytorch.layer_init(nn.Conv2d(5, cnn_channels, 3, stride=3, padding=1)),
             nn.ReLU(),
-            pufferlib.pytorch.layer_init(nn.Conv2d(cnn_channels, cnn_channels*2, 3, stride=1, padding=1)),
-            nn.ReLU(),
-            nn.Flatten(),
-        )
-
-        with torch.no_grad():
-            dummy = torch.zeros(1,5,7,7)
-            dum_out = self.conv_encoder(dummy)
-        head_conv = dum_out.shape[1]
-        self.proj = pufferlib.pytorch.layer_init(
-            nn.Linear(head_conv + hidden_size, hidden_size), std=0.01
         )
         self.decoder = pufferlib.pytorch.layer_init(
             nn.Linear(hidden_size, env.single_action_space.n), std=0.01
@@ -101,18 +88,29 @@ class PredPrey(nn.Module):
     def encode_observations(self, observations, state=None):
         batch = observations.shape[0]
         cont_obs = observations[:, -7:]
+        moore_obs = observations[:, :-7].view(batch, -1, 5).permute(0,2,1)
+        
+        terrain_hot = F.one_hot(moore_obs[:,0,:].long(), 4).reshape(batch, -1)
+        item_hot = F.one_hot(moore_obs[:,1,:].long(), 6).reshape(batch, -1)
+        entities = moore_obs[:,2,:].long() + 1 # Because empty was -1
+        entity_hot = F.one_hot(entities, 1 + self.num_agents).reshape(batch, -1)
+        
+        obs = torch.cat([
+            terrain_hot, item_hot, entity_hot, moore_obs[:,3:,:].reshape(batch, -1), cont_obs
+        ], dim = -1)
 
-        conv_obs = observations[:, :-7].view(batch, 7, 7, 5).permute(0, 3, 1, 2)
+        # conv_obs = observations[:, :-7].view(batch, 7, 7, 5).permute(0, 3, 1, 2)
         # terrain, item, ent = conv_obs[:, 0, :, :].long(), conv_obs[:, 1, :, :].long(), conv_obs[:, 2, :, :].long()
         # terrain_emb = self.terrain_emb(terrain)
         # item_emb = self.object_emb(item)
         # ent_emb = self.entity_emb(ent)
         # conv_in = torch.cat([terrain_emb, item_emb, ent_emb, conv_obs[:,3:,:,:]], dim=1)
-        conv_in = conv_obs
-        conv_features = self.conv_encoder(conv_in)
-        cont_features = self.cont_encoder(cont_obs)
-        obs = torch.cat([cont_features, conv_features], dim=1)
-        return self.proj(obs) 
+        # conv_in = conv_obs
+        # conv_features = self.conv_encoder(conv_in)
+        # cont_features = self.cont_encoder(cont_obs)
+        # obs = torch.cat([cont_features, conv_features], dim=1)
+        # return self.proj(obs) 
+        return self.encoder(obs)
     
     def decode_actions(self, flat_hidden):
         logits = self.decoder(flat_hidden)

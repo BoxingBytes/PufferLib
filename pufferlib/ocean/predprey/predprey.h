@@ -23,7 +23,7 @@
 
 #define MAX_TIMESTEPS (TICK_PER_YEAR*10) //2000
 
-// Tiles
+// Tiles/Terrain
 #define TILE_SOIL 0 
 #define TILE_FLOOR_WOOD 1
 #define TILE_WATER 2
@@ -697,7 +697,7 @@ void add_hp(PredPrey *env, int agent_id, float hp) {
     // int time_alive = env->tick - agent->start_tick;
     float reward = REWARD_DEATH; //(((float)time_alive-START_HP) / (float)MAX_TIMESTEPS) * env->reward_death_scale;
     reward_agent(env, agent_id, reward);
-    env->terminals[agent->id] = 1;
+    // env->terminals[agent->id] = 1;
     add_agent_log(env, agent_id);    
     remove_agent(env, agent_id);
     env->last_agent_dead_tick = env->tick;
@@ -1105,7 +1105,7 @@ void c_step(PredPrey *env) {
     // Log agent every X steps
     if ((env->tick - env->agents[i].start_tick) % 500 == 0){// MAX_TIMESTEPS && env->agents[i].hp > 0) {
       // remove_agent(env, i);
-      // env->terminals[i] = 1;
+      env->terminals[i] = 1;
       // reward_agent(env, i, env->reward_death_scale);
       add_agent_log(env, i);
       // spawn_agent(env, i);
