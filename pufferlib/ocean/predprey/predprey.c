@@ -17,7 +17,7 @@ int main() {
       .timestep_reward = 0.0f,
       .hp_reward_scale = 0.0f,
       .held_food_reward_scale = 0.0f,
-      .spawn_distance = 10,
+      .spawn_distance = 3,
   };
   allocate_cenv(&env);
   c_reset(&env);
