@@ -11,7 +11,8 @@ static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     env->spawn_distance = unpack(kwargs, "spawn_distance");
     env->reward_death_scale = unpack(kwargs, "reward_death_scale");
     env->reward_eat = unpack(kwargs, "reward_eat");
-    env->reward_collect = unpack(kwargs, "reward_collect");
+    env->reward_collect_food = unpack(kwargs, "reward_collect_food");
+    env->reward_collect_wood = unpack(kwargs, "reward_collect_wood");
     env->timestep_reward = unpack(kwargs, "timestep_reward");
     env->hp_reward_scale = unpack(kwargs, "hp_reward_scale");
     env->held_food_reward_scale = unpack(kwargs, "held_food_reward_scale");

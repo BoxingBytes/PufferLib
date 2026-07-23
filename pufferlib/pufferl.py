@@ -457,7 +457,6 @@ class PuffeRL:
         vf_clip = config['vf_clip_coef']
         anneal_beta = b0 + (1 - b0)*a*self.epoch/self.total_epochs
         self.ratio[:] = 1
-
         # ---- RND: observation stats + intrinsic reward for this rollout ----
         # Computed once per rollout (before the minibatch loop) with the current
         # predictor; the intrinsic *advantages* are then recomputed every

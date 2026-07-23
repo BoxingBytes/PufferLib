@@ -68,7 +68,7 @@
 #define HP_REWARD_FOOD 20
 #define HP_LOSS_PER_HOUR 2
 #define COLDNESS_LOSS_PER_HOUR 2
-#define HP_LOSS_COLD 10
+#define HP_LOSS_COLD 20
 #define MAX_HP 100 
 #define START_HP 80
 
@@ -117,6 +117,8 @@ struct Agent {
   int last_log_tick;
   unsigned char anim;
   unsigned char coldness;
+  bool got_wood;
+  bool got_food;
 };
 
 // typedef struct FoodList FoodList;
@@ -169,7 +171,8 @@ struct PredPrey {
 
   float reward_death_scale;
   float reward_eat;
-  float reward_collect;
+  float reward_collect_food;
+  float reward_collect_wood;
   float timestep_reward;
   float hp_reward_scale;
   float held_food_reward_scale;
@@ -726,7 +729,8 @@ void spawn_agent(PredPrey *env, int agent_id){
   agent->last_log_tick = env->tick;
   agent->food_amt = 0;
   agent->wood_amt = 0;
-
+  agent->got_food = false;
+  agent->got_wood = false;
   // // Spawn the agent at exactly spawn_distance movement-steps from the fireplace.
   // // We BFS outward from the fireplace over free (non-obstacle) tiles so that the
   // // returned distance is the true number of steps the agent would walk, and any
@@ -806,31 +810,30 @@ void spawn_agent(PredPrey *env, int agent_id){
   // free(queue);
   // free(cands);
 
-  // 1-100 chance
-  // Spawn agent with some wood 
-  // int rand_wood = rand() % 100;
-  // if (rand_wood < 5){
-  //   agent->wood_amt = 1;
-  // }
-  // int rand_spawn = rand() % 100;
-  // // Spawn in the grass with 10% chance
-  // if (rand_spawn < 5){
-  //   bool allocated = false;
-  //   int adr = 0;
-  //   while (!allocated){
-  //     int rand_idx = rand() % env->biome_idxs.grass_count;
-  //     adr = env->biome_idxs.grass_idx[rand_idx];
-  //     if (!is_obstacle(env, adr)){
-  //       agent->r = adr / env->width;
-  //       agent->c = adr % env->width;
-  //       allocated = true;
-  //     }
-  //   }
-  //   assert(env->pids[adr] == -1);
-  //   env->pids[adr] = agent->id;
-  //   env->agent_logs[agent_id] = (Log){0};
-  //   return;
-  // }    
+  // 1-100 chance spawn agent with some wood 
+  int rand_wood = rand() % 100;
+  if (rand_wood < 5){
+    agent->wood_amt = 1;
+  }
+  // chance to spawn agent in grass area
+  int rand_spawn = rand() % 100;
+  if (rand_spawn < 10){
+    bool allocated = false;
+    int adr = 0;
+    while (!allocated){
+      int rand_idx = rand() % env->biome_idxs.grass_count;
+      adr = env->biome_idxs.grass_idx[rand_idx];
+      if (!is_obstacle(env, adr)){
+        agent->r = adr / env->width;
+        agent->c = adr % env->width;
+        allocated = true;
+      }
+    }
+    assert(env->pids[adr] == -1);
+    env->pids[adr] = agent->id;
+    env->agent_logs[agent_id] = (Log){0};
+    return;
+  }    
 
   // Just randomly spawn agent within house tiles 
   bool allocated = false;
@@ -915,14 +918,17 @@ void interact_food(PredPrey* env, int agent_id){
   if (agent->food_amt >= MAX_INVENTORY_ITEM) {
     return;
   }
+  // Only get this reward once, to avoid spam
+  if (agent->got_food == false) {
+    reward_agent(env, agent_id, env->reward_collect_food);
+    agent->got_food = true;
+  }
   // Pick up food
   agent->food_amt += 1;
   env->items[curr_grid_idx] = EMPTY;
   env->food_count -= 1;
   env->agent_logs[agent_id].food_collects += 1;
   agent->anim = ANIM_INTERACT;
-  // TEST
-  // reward_agent(env, agent_id, env->reward_collect);
 };
 
 void interact_wood(PredPrey* env, int agent_id){
@@ -931,8 +937,10 @@ void interact_wood(PredPrey* env, int agent_id){
   if (agent->wood_amt >= MAX_INVENTORY_ITEM) {
     return;
   }
-  if (agent->wood_amt == 0) {
-    reward_agent(env, agent_id, env->reward_collect);
+  // Only get this reward once, to avoid spam
+  if (agent->got_wood == false) {
+    reward_agent(env, agent_id, env->reward_collect_wood);
+    agent->got_wood = true;
   }
   // Pick up wood
   agent->wood_amt += 1;
@@ -941,7 +949,6 @@ void interact_wood(PredPrey* env, int agent_id){
   env->agent_logs[agent_id].wood_collects += 1;
   agent->anim = ANIM_INTERACT;
 
-  // env->reward_collect *= 0.99; // Decay reward for collecting wood to avoid overcollecting
 };
 
 void interact_chest(PredPrey* env, int agent_id){
@@ -1018,9 +1025,12 @@ void handle_eat(PredPrey* env, int agent_id){
   if (agent->food_amt <= 0){
     return;
   }
+  // So that agen't can't keep eating and getting reward
+  if (agent->hp < MAX_HP - HP_REWARD_FOOD){
+    reward_agent(env, agent_id, env->reward_eat);    
+  }
   agent->food_amt -= 1;
-  // TEST
-  // add_hp(env, agent_id, HP_REWARD_FOOD);
+  add_hp(env, agent_id, HP_REWARD_FOOD);
   agent->anim = ANIM_EAT;
 };
 
@@ -1137,8 +1147,7 @@ void c_step(PredPrey *env) {
 
     if (env->tick % TICK_PER_HOUR == 0) {
       // Hourly HP decay
-      // TEST without HP LOSS
-      // remove_hp(env, i, HP_LOSS_PER_HOUR);
+      remove_hp(env, i, HP_LOSS_PER_HOUR);
     }
     
     // Log agent every X steps
