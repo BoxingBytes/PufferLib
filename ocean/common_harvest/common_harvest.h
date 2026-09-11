@@ -15,10 +15,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "raylib.h"
 
 #define MAX_AGENTS 32
-
+#define HORIZON 1000 // SocialJax's num_inner_steps
 // ---------------------------------------------------------------- grid codes
 #define EMPTY       0
 #define WALL        1   
@@ -41,6 +42,8 @@
 // dir 0 = +row, 1 = +col, 2 = -row, 3 = -col. TURN_LEFT is dir+1, TURN_RIGHT
 // is dir-1 (mod 4), matching SocialJax's ROTATIONS table.
 #define NUM_DIRS 4
+static const int8_t DIR_DROW[NUM_DIRS] = {1, 0, -1, 0};
+static const int8_t DIR_DCOL[NUM_DIRS] = {0, 1, 0, -1};
 
 // ------------------------------------------------------------------- regrowth
 // Probability that an EMPTY apple cell regrows, by count of live apples in its
@@ -51,16 +54,35 @@
 #define REGROW_P_1     0.001f
 // count == 0 -> 0.0f, never regrows.
 
+#define APPLE_MASK_SIZE 12
+// {dr, dc} for the 3x3 ring (8 cells) plus the 4 orthogonal cells at distance 2.
+static const int8_t APPLE_MASK_DR[APPLE_MASK_SIZE] = {-1,-1,-1, 0, 0, 1, 1, 1, -2, 2, 0, 0};
+static const int8_t APPLE_MASK_DC[APPLE_MASK_SIZE] = {-1, 0, 1,-1, 1,-1, 0, 1,  0, 0,-2, 2};
+
+// ---------------------------------------------------------------- beams
+#define BEAM_MASK_SIZE 4
+// The "T" shape in agent heading coordinates.
+static const int8_t BEAM_DR[BEAM_MASK_SIZE] = {+1, +1, +1, +2};
+static const int8_t BEAM_DC[BEAM_MASK_SIZE] = { 0, -1, +1,  0};  
 // ------------------------------------------------------------------ obs shape
-#define NUM_OBS_PLANES 2
+#define NUM_OBS_CHANNELS 2
+// SocialJax originally one-hot encode into 15 channels. 
+// Most of which were useless (inventory/frozen..). For the rest we let the policy one-hot. 
 // plane 0 -- terrain/occupancy: EMPTY / WALL / BEAM / APPLE / 4 = an agent
 // plane 1 -- agent detail: 0 where no agent, else 1 + 4*id + rel_dir if
 //            differentiate_other_agents_in_obs, else 1 + rel_dir.
 //            rel_dir = (their_dir - my_dir) & 3.
-// TODO: a way to get rid of the second plane? Mostly useless
-#define OBS_PLANE_AGENT 4
+#define OBS_WINDOW 11
 
 typedef struct Log {
+    float time_to_depletion;
+    float sustainability;
+    float efficiency;
+    float zap_rate;
+    float hit_rate;
+    float zap_timing;
+    float hit_timing;
+    float equality;
     float perf;
     float score;
     float episode_return;
@@ -73,11 +95,10 @@ typedef struct Client Client;
 typedef struct Env Env;
 struct Env {
     // ------------------------------------------------ PufferLib interface
-    uint8_t* observations;  // (num_agents, NUM_OBS_PLANES, OBS_SIZE, OBS_SIZE)
-    int32_t* actions;       // (num_agents,) 
+    uint8_t* observations;  // (num_agents, NUM_OBS_CHANNELS, OBS_WINDOW, OBS_WINDOW)
+    float* actions;         // (num_agents,)
     float* rewards;         // (num_agents,)
-    unsigned char* terminals;  // (num_agents,)
-    unsigned char *masks;  // (num_agents,) 1 = agent is alive, 0 = dead
+    float* terminals;       // (num_agents,)
     int num_agents;
     Log log;
     Client* client;
@@ -86,21 +107,20 @@ struct Env {
     // All stored indices are PADDED flat indices; only the renderer converts back.
     int ascii_height;    // map_height, UNPADDED, from ASCII map
     int ascii_width;     // map_width, UNPADDED, from ASCII map
-    int pad;       // OBS_SIZE - 1 
+    int pad;       // OBS_WINDOW - 1 
     int stride;    // map_width + 2*pad
-    int obs_size;   
 
     uint8_t* grid;  // (map_height + 2*pad) * stride; border filled with WALL
 
+    // ---------------------------------------------------------- observations
+    int32_t start[NUM_DIRS];  // flat relative index of the "behind to the left" corner
+    int32_t row_stride[NUM_DIRS];  // flat relative index of the next row in the obs window
+    int32_t col_stride[NUM_DIRS];  // flat relative index of the next col in the obs window
+
     // ------------------------------------------------------------ config
-    int horizon;                  // SocialJax num_inner_steps, default 1000
     bool beam_blocks_movement;    // default true
     bool differentiate_other_agents_in_obs;  // default true
     bool shared_rewards;          // default false
-    // TODO (chose): relative vs absolute agent id in obs plane 1. Relative
-    // ((other - me + N) % N) makes the observation permutation-consistent,
-    // which matters iff training with shared policy weights.
-    bool relative_agent_ids;
 
     // ------------------------------------------------------------ agents
     int32_t *agents_idx;  // padded flat cell index
@@ -108,28 +128,26 @@ struct Env {
 
     // ---------------------------------------------------- step scratch
     int32_t *target;  // proposed then resolved destination cell
-    uint8_t *hit;     // beamed this step, consumed by pick_respawn_cells next step TODO carefull about an agent being beamed twice
+    uint8_t *hit;     // beamed this step, consumed by pick_respawn_cells next step. Stores agent_ids TODO carefull about an agent being beamed twice
     int n_hit;
 
     // ------------------------------------------------- static cell sets
     // Parsed once from the ASCII map (see init). Padded flat indices.
     int32_t *apple_idx;      // 'A' -- 64 cells on the open map
     int n_apple;
+    int32_t apple_mask_offset[APPLE_MASK_SIZE]; // flat index deltas for the 12-cell regrow mask
     int32_t *respawn_idx;    // 'P' -- 60 cells; the only cells respawn uses
     int n_respawn;
     int32_t *respawn_in_idx; // 'Q' -- 2 cells; used only at reset
     int n_respawn_in;
 
-    uint8_t *new_apple;      // (n_apple,) regrow double-buffer, see apple_regrow
+    int32_t *new_apple;      // grid_idx, (n_apple,) see apple_regrow
+    int n_apple_new;
+    int n_apple_alive;
 
     // -------------------------------------------------------------- beams
     int32_t *beam_idx;   // Write beamed cells. For faster clearing lookup only
     int n_beam;
-
-    // ------------------------------------------------- obs offset tables
-    // enables to rotate and translate obs based on agent heading
-    int32_t *obs_off[NUM_DIRS];
-    uint8_t xlat[NUM_OBS_PLANES][256];
 
     // ---------------------------------------------------------------- rng
     uint32_t rng;  // Because rand() gave issues with low probs
@@ -138,6 +156,15 @@ struct Env {
 
     // -------------------------------------------------------------- map 
     const char *map_ASCII[16];
+
+    // -------------------------------------------------------------- logging
+    float sum_ticks_apple_collected; // For computing sustainability
+    float tot_apple_collected; // For computing sustainability
+    float tot_zaps;
+    float tot_hits;
+    float sum_ticks_zap; // For computing zap_timing
+    float sum_ticks_hit; // For computing hit_timing
+    float *agent_returns; // For computing equality
 };
 
 // ================================================================== rng
@@ -192,8 +219,20 @@ void init(Env* env){
 
     env->ascii_width = strlen(map[0]);
     env->ascii_height = sizeof(map) / sizeof(map[0]);
-    env->pad = env->obs_size - 1; //Because obs start one cell behind the agent
+    env->pad = OBS_WINDOW - 1; //Because obs start one cell behind the agent
     env->stride = env->ascii_width + 2*env->pad;
+
+    // Observation windows sweep from "left-to-right" relative to agent dir, from behind to ahead.
+    for (int d = 0; d < NUM_DIRS; d++){
+        env->row_stride[d] = DIR_DROW[d]*env->stride + DIR_DCOL[d];
+        env->col_stride[d] = DIR_DCOL[d]*env->stride - DIR_DROW[d];
+        env->start[d] = -env->row_stride[d] - (OBS_WINDOW/2)*env->col_stride[d];
+    }
+
+    // Makes it easier to compute the 12-cell mask for apple regrowth.
+    for (int k = 0; k < APPLE_MASK_SIZE; k++){
+        env->apple_mask_offset[k] = APPLE_MASK_DR[k]*env->stride + APPLE_MASK_DC[k];
+    }
 
     const int tot_flattened = (env->ascii_height + 2*env->pad)*(env->stride);
     env->grid = (uint8_t*)calloc(tot_flattened, sizeof(uint8_t));
@@ -207,7 +246,7 @@ void init(Env* env){
     env->n_respawn = 0;
     env->respawn_in_idx = (int32_t*)calloc(2, sizeof(int32_t));
     env->n_respawn_in = 0;
-    env->new_apple = (uint8_t*)calloc(64, sizeof(uint8_t));
+    env->new_apple = (int32_t*)calloc(64, sizeof(int32_t));
 
     env->agents_idx = (int32_t*)calloc(env->num_agents, sizeof(int32_t));
     env->agents_dir = (uint8_t*)calloc(env->num_agents, sizeof(uint8_t));
@@ -217,11 +256,7 @@ void init(Env* env){
     env->beam_idx = (int32_t*)calloc(4*env->num_agents, sizeof(int32_t));
     env->n_beam = 0;
 
-    for (int d = 0; d < NUM_DIRS; d++){
-        env->obs_off[d] = (int32_t*)calloc(env->obs_size*env->obs_size, sizeof(int32_t));
-    }
-
-    const int offset = env->stride + env->pad;
+    const int offset = env->stride*env->pad + env->pad;
 
     for (int r = 0; r < env->ascii_height; r++){
         for (int c = 0; c < env->ascii_width; c++){
@@ -243,27 +278,56 @@ void init(Env* env){
             }
         }
     };
+
+    // Logging
+    env->agent_returns = (float*)calloc(env->num_agents, sizeof(float));
 };
 
 
-// Egocentric OBS_SIZE x OBS_SIZE window per agent, NUM_OBS_PLANES planes, agent
-// at (1, OBS_SIZE/2) facing toward increasing row: 1 cell behind, OBS_SIZE-2
-// ahead. Emits integer codes; one-hot/embedding is the policy's job.
-// obs[k] = xlat[plane][grid[agents_idx[i] + obs_off[dir][k]]], with xlat
-// rebuilt per observer so that other agents' headings come out relative
-// ((their_dir - my_dir) & 3). Runs after fire_beams so beams are visible.
-// This loop is the whole step's cost: num_agents * obs_size^2 * NUM_OBS_PLANES
-// gathers and stores, against roughly 25 grid writes for everything else.
-// Reads: grid, agents_idx, agents_dir. Writes: xlat, observations.
-void compute_observations(Env* env);
+// OBS_WINDOW x OBS_WINDOW window per agent, NUM_OBS_CHANNELS channels.
+// Each agent's window is oriented relative to its heading, with the agent at
+// the center of the window's bottom 2nd row. 
+void compute_observations(Env* env){
+
+    for (int a = 0; a < env->num_agents; a++){
+        const int32_t channel0_base = a*NUM_OBS_CHANNELS*OBS_WINDOW*OBS_WINDOW + 0*OBS_WINDOW*OBS_WINDOW;
+        const int32_t channel1_base = a*NUM_OBS_CHANNELS*OBS_WINDOW*OBS_WINDOW + 1*OBS_WINDOW*OBS_WINDOW;
+
+        const int32_t agent_idx = env->agents_idx[a];
+        const uint8_t agent_dir = env->agents_dir[a];
+        // Locate "behind to the left" corner. 
+        const int32_t start_idx = agent_idx + env->start[agent_dir];
+
+        for (int r = 0; r < OBS_WINDOW; r++){
+            for (int c = 0; c < OBS_WINDOW; c++){
+                // Then use precomputed row/col strides to walk the window, filling in the values.
+                const int32_t cell_idx = (start_idx + r*env->row_stride[agent_dir]) + c*env->col_stride[agent_dir];
+                uint8_t cell_content = env->grid[cell_idx];
+                int32_t rel_dir = 0;
+                const int32_t k = r*OBS_WINDOW + c;
+
+                if (cell_content >= AGENT_BASE){
+                    const int32_t other_agent_id = cell_content - AGENT_BASE;
+                    const uint8_t other_agent_dir = env->agents_dir[other_agent_id];
+                    rel_dir = (other_agent_dir - agent_dir) & 3; // works because modulo is 2^n and rel_dir can be < 0
+                    
+                    if (env->differentiate_other_agents_in_obs){
+                        // Encoding both agent_id & direction in one go, bad idea? 
+                        env->observations[channel1_base + k] = 1 + 4*other_agent_id + rel_dir;
+                    } else {
+                        env->observations[channel1_base + k] = 1 + rel_dir;
+                    }
+
+                    cell_content = AGENT_BASE; // For channel 0
+                }
+                env->observations[channel0_base + k] = cell_content;
+            }
+        }
+    };
+};
 
 
-// ================================================================= api
-// Full episode reset: rebuilds the grid from the static cell sets (all apple
-// cells live), seats agents, clears respawn_target/beams/tick, and computes
-// observations.
 // Matches SocialJax: agents 0 and 1 seat on the 2 'Q' cells, the rest on 'P'
-// cells.
 void c_reset(Env* env){
     env->tick = 0;
     memset(env->hit, 0, env->num_agents*sizeof(uint8_t));
@@ -271,17 +335,15 @@ void c_reset(Env* env){
     memset(env->target, 0, env->num_agents*sizeof(int32_t));
     memset(env->beam_idx, 0, 4*env->num_agents*sizeof(int32_t));
     env->n_beam = 0;
-    memset(env->new_apple, 0, env->n_apple*sizeof(uint8_t));
+    memset(env->new_apple, 0, env->n_apple*sizeof(int32_t));
 
     // Puffer
     memset(env->rewards, 0, env->num_agents*sizeof(float));
-    memset(env->terminals, 0, env->num_agents*sizeof(unsigned char));
-    memset(env->observations, 0, env->num_agents*NUM_OBS_PLANES*env->obs_size*env->obs_size*sizeof(uint8_t));
-    memset(env->masks, 1, env->num_agents*sizeof(unsigned char));
-    env->log = (Log){0};
+    memset(env->terminals, 0, env->num_agents*sizeof(float));
+    memset(env->observations, 0, env->num_agents*NUM_OBS_CHANNELS*OBS_WINDOW*OBS_WINDOW*sizeof(uint8_t));
 
     // Rebuild the grid
-    const int offset = env->stride + env->pad;
+    const int offset = env->stride*env->pad + env->pad;
     for (int r = 0; r < env->ascii_height; r++){
         memset(env->grid + offset + r*env->stride, EMPTY, env->ascii_width*sizeof(uint8_t));
     }
@@ -305,107 +367,308 @@ void c_reset(Env* env){
         env->agents_idx[i] = idx;
         env->agents_dir[i] = rnd(env) % NUM_DIRS;
     }
+
+    // Logging
+    env->n_apple_alive = env->n_apple;
+    env->sum_ticks_apple_collected = 0.0f;
+    env->tot_apple_collected = 0.0f;
+    env->tot_zaps = 0.0f;
+    env->tot_hits = 0.0f;
+    env->sum_ticks_zap = 0.0f;
+    env->sum_ticks_hit = 0.0f;
+    memset(env->agent_returns, 0, env->num_agents*sizeof(float));
+
+    compute_observations(env);
 };
 
+// Uses Gini coefficient as in inequity aversion (Hughes et. al 2018)
+float compute_equality(Env* env){
+    float double_sum = 0.0f;
+    float sum = 0.0f;
+    for (int i = 0; i < env->num_agents; i++){
+        sum += env->agent_returns[i];
+        for (int j = 0; j < env->num_agents; j++){
+            double_sum += fabsf(env->agent_returns[i] - env->agent_returns[j]);
+        }
+    }
+    if (sum == 0.0f) return 1.0f; // All agents have zero return, perfect equality
+    return 1.0f - double_sum / (2.0f * env->num_agents * sum);
+};
 
-void add_log(Env* env);
+void add_log(Env* env){
+    if (env->n_apple_alive > 0) env->log.time_to_depletion += (float)HORIZON;
 
-// ============================================================ step passes
-// Called in this order by c_step. Each is a side-effecting pass over Env; the
-// reads/writes below are the complete set.
+    if (env->tot_apple_collected == 0.0f){
+        env->log.sustainability += (float)HORIZON;
+    } else {
+        env->log.sustainability += env->sum_ticks_apple_collected / env->tot_apple_collected;
+    } 
 
-// Relocates agents killed last step onto their pre-chosen respawn cell and
-// gives them a fresh random heading.
-// MUST clear all vacated cells before stamping any new one: a reborn agent's
-// target may be another reborn agent's death cell, and a single fused loop
-// would erase one of them depending only on agent index order.
-// OPEN: heading draw range. SocialJax uses maxval=3, so agents never spawn
-// facing direction 3; use 4.
-// Reads: respawn_target, agents_idx. Writes: grid, agents_idx, agents_dir,
-// respawn_target.
-void apply_respawns(Env* env);
+    if (env->tot_zaps == 0.0f){
+        env->log.zap_timing += (float)HORIZON;
+    } else {
+        env->log.zap_timing += env->sum_ticks_zap / env->tot_zaps;
+    }
 
-// Regrows apples with probability by live-apple count in the 12-cell mask:
-// >=3 -> 0.025, 2 -> 0.005, 1 -> 0.001, 0 -> never. Cells already holding an
-// APPLE are left alone; cells holding anything else (agent, corpse, beam mark)
-// are skipped entirely, so no apple ever grows under an agent and a beamed cell
-// loses one step of regrow opportunity.
-// Results go into new_apple[] and are applied in a second pass, so regrowth is
-// simultaneous: a cell that grows here must not count as a neighbour for a
-// later cell in the same pass. A 64-byte buffer, not a grid copy.
-// Reads: apple_idx, grid, rng. Writes: new_apple, grid (only cells that grow).
-void apple_regrow(Env* env);
+    if (env->tot_hits == 0.0f){
+        env->log.hit_timing += (float)HORIZON;
+    } else {
+        env->log.hit_timing += env->sum_ticks_hit / env->tot_hits;
+    }
+    env->log.equality += compute_equality(env);
+    env->log.efficiency += env->tot_apple_collected / (float)HORIZON;
+    env->log.zap_rate += env->tot_zaps / (float)HORIZON;
+    env->log.hit_rate += env->tot_hits / (float)HORIZON;
 
-// Clears this env's beam marks. Walks beam_idx rather than scanning the grid,
-// and MUST guard each write with grid[c] == BEAM: a recorded cell may since
-// have been overwritten by an agent stamp or a regrown apple, and an unguarded
-// clear would delete them.
-// Reads: beam_idx, grid. Writes: grid, n_beam.
-void beam_clear(Env* env);
+    env->log.perf += env->tot_apple_collected/(env->num_agents*HORIZON); // Loose
+    env->log.score += env->tot_apple_collected;
+    env->log.episode_length += env->tick;
+    env->log.episode_return += env->tot_apple_collected;
+    
+    env->log.n++;
+};
 
-// Turns take effect immediately (visible in this step's observation). Moves are
-// egocentric w.r.t. agent heading -- FORWARD is always forward w.r.t. heading,
-// not "up" in the world. Turn and zap actions target the agent's own cell.
-// Terrain blocking happens here, not in resolve_conflicts: a target holding
-// WALL, or holding BEAM while beam_blocks_movement, collapses to the agent's
-// own cell. Padding means no clipping is needed.
-// Reads: actions, agents_idx, agents_dir, grid. Writes: target, agents_dir.
-void compute_targets(Env* env);
+void apply_respawns(Env* env){
+    for (int i = 0; i < env->n_hit; i++){
+        const int32_t agent_id = env->hit[i];
+        int32_t respawn_cell;
+        do {
+            respawn_cell = rnd(env) % env->n_respawn;
+        } while (env->grid[env->respawn_idx[respawn_cell]] != EMPTY);
+        uint8_t new_dir = (rnd(env) % (NUM_DIRS - 1)) + 1; // 1..3, never 0 = original SocialJax
+        env->grid[env->agents_idx[agent_id]] = EMPTY;
+        env->agents_idx[agent_id] = env->respawn_idx[respawn_cell];
+        env->agents_dir[agent_id] = new_dir;
+        env->grid[env->agents_idx[agent_id]] = AGENT_BASE + agent_id;
+    }
+    env->n_hit = 0;
+};
+
+void apple_regrow(Env* env){
+
+    env->n_apple_new = 0;
+    // Compute regrowth for each apple cell. 
+    for (int i = 0; i < env->n_apple; i++){
+        int32_t apple_cell = env->apple_idx[i];
+        
+        // We only look to regrow apples where it's empty 
+        if (env->grid[apple_cell] != EMPTY) continue;
+
+        int live_count = 0;
+        for (int k = 0; k < APPLE_MASK_SIZE; k++){
+            int32_t neighbor_cell = apple_cell + env->apple_mask_offset[k];
+            if (env->grid[neighbor_cell] == APPLE) live_count++;
+        }
+
+        float p = 0.0f;
+        if (live_count == 1) p = REGROW_P_1;
+        else if (live_count == 2) p = REGROW_P_2;
+        else if (live_count >= 3) p = REGROW_P_3PLUS;
+        
+        if (rndf(env) < p) env->new_apple[env->n_apple_new++] = apple_cell;            
+    }
+
+    // Apply the regrowth
+    for (int i = 0; i < env->n_apple_new; i++){
+        env->n_apple_alive++;
+        int32_t apple_cell = env->new_apple[i];
+        env->grid[apple_cell] = APPLE;
+    }
+};
+
+void beam_clear(Env* env){
+    for (int i = 0; i < env->n_beam; i++){
+        int32_t cell = env->beam_idx[i];
+        if (env->grid[cell] == BEAM) env->grid[cell] = EMPTY;
+    }
+    env->n_beam = 0;
+};
+
+// Compute next_cell targets. Turns take effect immediately. Moves are
+// egocentric w.r.t. agent heading -- FORWARD is always forward w.r.t. heading.
+void compute_targets(Env* env){
+    memset(env->target, 0, env->num_agents*sizeof(int32_t));
+    for (int a = 0; a < env->num_agents; a++){
+        const int32_t agent_idx = env->agents_idx[a];
+        const uint8_t agent_dir = env->agents_dir[a];
+        const int32_t action = (int32_t)env->actions[a];
+
+        int32_t target_idx = agent_idx;
+        uint8_t new_dir = agent_dir;
+
+        switch (action){
+            case ACTION_TURN_LEFT:
+                new_dir = (agent_dir + 1) & 3;
+                break;
+            case ACTION_TURN_RIGHT:
+                new_dir = (agent_dir - 1) & 3;
+                break;
+            case ACTION_FORWARD:
+                target_idx += env->row_stride[agent_dir];
+                break;
+            case ACTION_BACKWARD:
+                target_idx -= env->row_stride[agent_dir];
+                break;
+            case ACTION_STRAFE_LEFT:
+                target_idx -= env->col_stride[agent_dir];
+                break;
+            case ACTION_STRAFE_RIGHT:
+                target_idx += env->col_stride[agent_dir];
+                break;
+            case ACTION_NOOP:
+            case ACTION_ZAP:
+                break;
+            default:
+                printf("compute_targets: invalid action %d\n", action);
+                break;
+        }
+
+        if (env->grid[target_idx] == WALL || (env->grid[target_idx] == BEAM)){
+            target_idx = agent_idx;
+        }
+
+        env->target[a] = target_idx;
+        env->agents_dir[a] = new_dir;
+    }
+};
 
 // Agent-agent conflict resolution, Melting Pot semantics (see
 // socialjax/environments/movement.py): a non-mover always keeps its cell;
 // among movers contesting one cell a uniformly random winner is chosen and the
-// rest revert; 2-cycles (swaps) are blocked; cycles of length >= 3 are allowed;
-// "trains" (B enters the cell A vacates in the same step) are allowed, and a
-// revert cascades to whoever was following, iterated to a fixed point.
-// Postcondition: all N destinations are pairwise distinct.
-// Touches NO grid -- pure position arithmetic. Terrain was handled in
-// compute_targets; a grid read here means something has leaked.
-// Reads: target, agents_idx, rng. Writes: target.
-void resolve_conflicts(Env* env);
+// rest revert; 2-cycles (swaps) are blocked.
+void resolve_conflicts(Env* env){
+    bool conflict = false;
+    uint8_t n_iter = 0;
+    do {
+        for (int i = 0; i < env->num_agents; i++){
+            for (int j = i + 1; j < env->num_agents; j++){
+                
+                // Swaps btw 2 agents disabled
+                if (env->target[i] == env->agents_idx[j] && env->target[j] == env->agents_idx[i]){
+                    env->target[i] = env->agents_idx[i];
+                    env->target[j] = env->agents_idx[j];
+                    conflict = true;
+                    continue;
+                }
+
+                if (env->target[i] == env->target[j]){
+                    conflict = true;
+
+                    // Non mover always keeps its cell
+                    if (env->target[i] == env->agents_idx[i]){
+                        env->target[j] = env->agents_idx[j];
+                        continue;
+                    } else if (env->target[j] == env->agents_idx[j]){
+                        env->target[i] = env->agents_idx[i];
+                        continue;
+                    }
+
+                    // Randomly pick a winner, revert the loser to its original cell.
+                    if (rnd(env) & 1){
+                        env->target[j] = env->agents_idx[j];
+                    } else {
+                        env->target[i] = env->agents_idx[i];
+                    }
+                }
+            }
+        }
+        n_iter++;
+    } while (conflict && n_iter < env->num_agents - 1);
+};
 
 // Rewards agents whose RESOLVED destination holds an apple. Must run before
-// move_agents stamps over it. A non-mover never collects (its own cell holds
-// its own agent code, and no apple can grow beneath it).
-// Reads: target, grid. Writes: rewards, log.
-void collect_apples(Env* env);
+// move_agents stamps over it. 
+void collect_apples(Env* env){
+    for (int a = 0; a < env->num_agents; a++){
+        const int32_t target_idx = env->target[a];
+        if (env->grid[target_idx] == APPLE){
+            env->rewards[a] += 1.0f;
+            env->grid[target_idx] = EMPTY;
+            // Logging
+            env->sum_ticks_apple_collected += (float)env->tick;
+            env->tot_apple_collected += 1.0f;
+            env->n_apple_alive--;
+            env->agent_returns[a] += 1.0f;
+        }
+    }
+};
 
-// Applies resolved destinations to the grid. Same hazard as apply_respawns:
-// all clears before all stamps, or a train erases the agent it is following.
-// Reads: target, agents_idx. Writes: grid, agents_idx.
-void move_agents(Env* env);
+// Applies resolved destinations to the grid.
+void move_agents(Env* env){
+    for (int a = 0; a < env->num_agents; a++){
+        const int32_t agent_idx = env->agents_idx[a];
+        const int32_t target_idx = env->target[a];
+        if (agent_idx != target_idx){
+            env->grid[agent_idx] = EMPTY;
+            env->grid[target_idx] = AGENT_BASE + a;
+            env->agents_idx[a] = target_idx;
+        }
+    }
+};
 
-// Fires the reverse-T beam for every agent whose action is ZAP: the 3-wide
-// line at distance 1 (forward, forward+left, forward+right) plus the stem at
-// distance 2 forward. No line of sight, no stopping at the first hit, all four
-// cells always resolved, no cooldown.
-// A cell holding an agent code is a hit -- one hit is lethal, and the victim
-// may be a corpse or may be simultaneously killing its killer. A BEAM mark is
-// written only to EMPTY cells, so a beam that lands on an agent, apple or wall
-// leaves no visible trace: nobody but the victim can see that a hit occurred.
-// All four target cells are recorded in beam_idx regardless.
-// Reads: actions, agents_idx, agents_dir, grid. Writes: grid, beam_idx,
-// n_beam, hit, log.
-void fire_beams(Env* env);
+void fire_beams(Env* env){
+    for (int a = 0; a < env->num_agents; a++){
+        if ((int32_t)env->actions[a] != ACTION_ZAP) continue;
 
-// Chooses each hit agent's respawn cell, consumed by apply_respawns at the top
-// of the next step (this is what makes death deferred). Draws from respawn_idx
-// ('P') only, never 'Q'. A cell is available if no SURVIVOR occupies it -- a
-// hit agent standing on a 'P' cell vacates it -- and no two agents reborn in
-// the same step may pick the same cell.
-// Reads: hit, agents_idx, grid, respawn_idx, rng. Writes: respawn_target.
-void pick_respawn_cells(Env* env);
+        env->tot_zaps += 1.0f;
+        env->sum_ticks_zap += (float)env->tick; // Logging
 
-// Runs the passes above in order, then rewards/terminals/tick. On tick ==
-// horizon it resets in place and returns the fresh observation, with the
-// horizon step's reward left intact.
-void c_step(Env* env);
+        const int32_t agent_idx = env->agents_idx[a];
+        const uint8_t agent_dir = env->agents_dir[a];
+
+        for (int k = 0; k < BEAM_MASK_SIZE; k++){
+            const int32_t cell_idx = agent_idx + BEAM_DR[k]*env->row_stride[agent_dir] + BEAM_DC[k]*env->col_stride[agent_dir];
+            env->beam_idx[env->n_beam++] = cell_idx;
+            if (env->grid[cell_idx] >= AGENT_BASE){
+                const int32_t victim_id = env->grid[cell_idx] - AGENT_BASE;
+                env->hit[env->n_hit++] = victim_id;
+                env->sum_ticks_hit += (float)env->tick; // Logging
+            } else if (env->grid[cell_idx] == EMPTY){
+                env->grid[cell_idx] = BEAM;
+            }
+        }
+    }
+    env->tot_hits += (float)env->n_hit;
+};
+
+void c_step(Env* env){
+    env->tick += 1;
+    memset(env->observations, 0, env->num_agents*NUM_OBS_CHANNELS*OBS_WINDOW*OBS_WINDOW*sizeof(uint8_t));
+    memset(env->rewards, 0, env->num_agents*sizeof(float));
+    memset(env->terminals, 0, env->num_agents*sizeof(float));
+
+    apply_respawns(env);
+    apple_regrow(env);
+    if (!env->beam_blocks_movement) beam_clear(env);
+    compute_targets(env);
+    resolve_conflicts(env);
+    collect_apples(env);
+    move_agents(env);
+    if (env->beam_blocks_movement) beam_clear(env);
+    fire_beams(env);
+
+    // Logging
+    if (env->n_apple_alive == 0 && env->log.time_to_depletion == 0) env->log.time_to_depletion = (float)env->tick;
+
+    if (env->tick >= HORIZON){
+        add_log(env);
+        for (int a = 0; a < env->num_agents; a++) env->terminals[a] = 1.0f;
+        c_reset(env);
+    }
+
+    compute_observations(env);
+};
 
 // ================================================================ render
 const Color WALL_COLOR  = (Color){173, 216, 230, 255}; // pale blue
 const Color EMPTY_COLOR = (Color){255, 255, 255, 255}; // white
 const Color APPLE_COLOR = (Color){200, 0, 0, 255};      // strong red
 const Color BEAM_COLOR  = (Color){255, 255, 153, 255};  // pale yellow
+
+#define HEADER_FONT_SIZE 20
+#define HEADER_LINE_HEIGHT 24
+#define HEADER_HEIGHT (2*HEADER_LINE_HEIGHT)
+#define HEADER_MARGIN 10
 
 struct Client {
     int cell_size;
@@ -418,7 +681,7 @@ Client* make_client(Env* env){
     Client* client = (Client*)calloc(1, sizeof(Client));
     client->cell_size = 32;
     client->width  = (env->ascii_width + 2)*client->cell_size;
-    client->height = (env->ascii_height + 2)*client->cell_size;
+    client->height = (env->ascii_height + 2)*client->cell_size + HEADER_HEIGHT;
     InitWindow(client->width, client->height, "PufferLib Commons Harvest");
     SetTargetFPS(60);
     client->puffers = LoadTexture("resources/shared/puffers.png");
@@ -458,12 +721,28 @@ void c_render(Env* env){
     }
 
     BeginDrawing();
-    ClearBackground(WALL_COLOR); 
+    ClearBackground(WALL_COLOR);
+
+    char header_buf[64];
+    snprintf(header_buf, sizeof(header_buf), "NZap: %d", (int)env->tot_zaps);
+    DrawText(header_buf, HEADER_MARGIN, 0, HEADER_FONT_SIZE, BLACK);
+
+    snprintf(header_buf, sizeof(header_buf), "NHits: %d", (int)env->tot_hits);
+    DrawText(header_buf, client->width/2 - MeasureText(header_buf, HEADER_FONT_SIZE)/2, 0, HEADER_FONT_SIZE, BLACK);
+
+    snprintf(header_buf, sizeof(header_buf), "tick: %d", env->tick);
+    DrawText(header_buf, client->width - HEADER_MARGIN - MeasureText(header_buf, HEADER_FONT_SIZE), 0, HEADER_FONT_SIZE, BLACK);
+
+    snprintf(header_buf, sizeof(header_buf), "apples collected: %d", (int)env->tot_apple_collected);
+    DrawText(header_buf, HEADER_MARGIN, HEADER_LINE_HEIGHT, HEADER_FONT_SIZE, BLACK);
+
+    snprintf(header_buf, sizeof(header_buf), "equality: %.3f", compute_equality(env));
+    DrawText(header_buf, client->width/2 - MeasureText(header_buf, HEADER_FONT_SIZE)/2, HEADER_LINE_HEIGHT, HEADER_FONT_SIZE, BLACK);
 
     const int cs = client->cell_size;
-    const int offset = env->stride + env->pad;
+    const int offset = env->stride*env->pad + env->pad;
     for (int r = 0; r < env->ascii_height; r++){
-        const int y = (r + 1)*cs;
+        const int y = HEADER_HEIGHT + (r + 1)*cs;
         for (int c = 0; c < env->ascii_width; c++){
             const uint8_t cell = env->grid[offset + r*env->stride + c];
             const int x = (c + 1)*cs;
@@ -505,9 +784,7 @@ void c_close(Env* env){
     free(env->target);
     free(env->hit);
     free(env->beam_idx);
-    for (int d = 0; d < NUM_DIRS; d++){
-        free(env->obs_off[d]);
-    }
+    free(env->agent_returns);
     if (env->client != NULL){
         close_client(env->client);
     }
