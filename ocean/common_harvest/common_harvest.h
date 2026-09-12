@@ -417,8 +417,8 @@ void add_log(Env* env){
     }
     env->log.equality += compute_equality(env);
     env->log.efficiency += env->tot_apple_collected / (float)HORIZON;
-    env->log.zap_rate += env->tot_zaps / (float)HORIZON;
-    env->log.hit_rate += env->tot_hits / (float)HORIZON;
+    env->log.zap_rate += env->tot_zaps / (env->num_agents * (float)HORIZON);
+    env->log.hit_rate += env->tot_hits / (env->num_agents * (float)HORIZON);
 
     env->log.perf += env->tot_apple_collected/(env->num_agents*HORIZON); // Loose
     env->log.score += env->tot_apple_collected;
