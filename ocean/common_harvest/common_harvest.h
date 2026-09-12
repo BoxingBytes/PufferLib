@@ -289,69 +289,41 @@ void init(Env* env){
 // the center of the window's bottom 2nd row. 
 void compute_observations(Env* env){
 
-    // Channel 0 (terrain/occupancy): branch-free pass over every window cell.
-    // Any agent-occupied cell collapses to the constant AGENT_BASE (which
-    // agent doesn't matter for this channel).
     for (int a = 0; a < env->num_agents; a++){
-        const int32_t channel0_base = a*NUM_OBS_CHANNELS*OBS_WINDOW*OBS_WINDOW;
+        const int32_t channel0_base = a*NUM_OBS_CHANNELS*OBS_WINDOW*OBS_WINDOW + 0*OBS_WINDOW*OBS_WINDOW;
+        const int32_t channel1_base = a*NUM_OBS_CHANNELS*OBS_WINDOW*OBS_WINDOW + 1*OBS_WINDOW*OBS_WINDOW;
+
         const int32_t agent_idx = env->agents_idx[a];
         const uint8_t agent_dir = env->agents_dir[a];
-        // Locate "behind to the left" corner.
+        // Locate "behind to the left" corner. 
         const int32_t start_idx = agent_idx + env->start[agent_dir];
 
         for (int r = 0; r < OBS_WINDOW; r++){
-            const int32_t row_idx = start_idx + r*env->row_stride[agent_dir];
             for (int c = 0; c < OBS_WINDOW; c++){
-                const int32_t cell_idx = row_idx + c*env->col_stride[agent_dir];
-                const uint8_t cell_content = env->grid[cell_idx];
-                env->observations[channel0_base + r*OBS_WINDOW + c] =
-                    (cell_content < AGENT_BASE) ? cell_content : AGENT_BASE;
+                // Then use precomputed row/col strides to walk the window, filling in the values.
+                const int32_t cell_idx = (start_idx + r*env->row_stride[agent_dir]) + c*env->col_stride[agent_dir];
+                uint8_t cell_content = env->grid[cell_idx];
+                int32_t rel_dir = 0;
+                const int32_t k = r*OBS_WINDOW + c;
+
+                if (cell_content >= AGENT_BASE){
+                    const int32_t other_agent_id = cell_content - AGENT_BASE;
+                    const uint8_t other_agent_dir = env->agents_dir[other_agent_id];
+                    rel_dir = (other_agent_dir - agent_dir) & 3; // works because modulo is 2^n and rel_dir can be < 0
+                    
+                    if (env->differentiate_other_agents_in_obs){
+                        // Encoding both agent_id & direction in one go, bad idea? 
+                        env->observations[channel1_base + k] = 1 + 4*other_agent_id + rel_dir;
+                    } else {
+                        env->observations[channel1_base + k] = 1 + rel_dir;
+                    }
+
+                    cell_content = AGENT_BASE; // For channel 0
+                }
+                env->observations[channel0_base + k] = cell_content;
             }
         }
-    }
-
-    // Channel 1 (agent detail): O(num_agents^2) instead of O(num_agents*window^2).
-    // Relies on c_step's per-tick memset of env->observations for the 0 default,
-    // and only visits actual agent pairs instead of every window cell.
-    for (int a = 0; a < env->num_agents; a++){
-        const int32_t channel1_base = a*NUM_OBS_CHANNELS*OBS_WINDOW*OBS_WINDOW + OBS_WINDOW*OBS_WINDOW;
-        const uint8_t agent_dir = env->agents_dir[a];
-        const int32_t agent_row = env->agents_idx[a] / env->stride;
-        const int32_t agent_col = env->agents_idx[a] % env->stride;
-
-        // b == a included on purpose: matches the old loop's behavior of
-        // marking an agent's own cell in its own channel 1.
-        for (int b = 0; b < env->num_agents; b++){
-            const int32_t other_row = env->agents_idx[b] / env->stride;
-            const int32_t other_col = env->agents_idx[b] % env->stride;
-            const int32_t drow = other_row - agent_row;
-            const int32_t dcol = other_col - agent_col;
-
-            // Rotate (drow, dcol) into agent a's forward/right frame.
-            int32_t fwd, right;
-            switch (agent_dir){
-                case 0: fwd =  drow; right = -dcol; break;
-                case 1: fwd =  dcol; right =  drow; break;
-                case 2: fwd = -drow; right =  dcol; break;
-                default: fwd = -dcol; right = -drow; break; // case 3
-            }
-
-            const int32_t r = fwd + 1;
-            const int32_t c = right + OBS_WINDOW/2;
-            if (r < 0 || r >= OBS_WINDOW || c < 0 || c >= OBS_WINDOW) continue;
-
-            const uint8_t other_dir = env->agents_dir[b];
-            const int32_t rel_dir = (other_dir - agent_dir) & 3; // works because modulo is 2^n and rel_dir can be < 0
-            const int32_t k = r*OBS_WINDOW + c;
-
-            if (env->differentiate_other_agents_in_obs){
-                // Encoding both agent_id & direction in one go, bad idea?
-                env->observations[channel1_base + k] = 1 + 4*b + rel_dir;
-            } else {
-                env->observations[channel1_base + k] = 1 + rel_dir;
-            }
-        }
-    }
+    };
 };
 
 
