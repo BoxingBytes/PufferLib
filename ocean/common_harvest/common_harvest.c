@@ -54,6 +54,8 @@ void performance_test() {
         .num_agents = 4,
         .differentiate_other_agents_in_obs = false,
         .beam_blocks_movement = true,
+        .shared_rewards = false,
+        .rng = 42,
     };
     env.observations = (uint8_t*)calloc(env.num_agents*NUM_OBS_CHANNELS*OBS_WINDOW*OBS_WINDOW, sizeof(uint8_t));
     env.rewards = (float*)calloc(env.num_agents, sizeof(float));
@@ -94,9 +96,11 @@ void performance_test() {
 
 void demo() {
     Env env = {
-        .num_agents = 1,
+        .num_agents = 7,
         .differentiate_other_agents_in_obs = false,
         .beam_blocks_movement = true,
+        .shared_rewards = false,
+        .rng = 42,
     };
     env.observations = (uint8_t*)calloc(env.num_agents*NUM_OBS_CHANNELS*OBS_WINDOW*OBS_WINDOW, sizeof(uint8_t));
     env.rewards = (float*)calloc(env.num_agents, sizeof(float));

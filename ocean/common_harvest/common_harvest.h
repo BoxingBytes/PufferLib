@@ -150,7 +150,7 @@ struct Env {
     int n_beam;
 
     // ---------------------------------------------------------------- rng
-    uint32_t rng;  // Because rand() gave issues with low probs
+    uint32_t rng;  // Seed in, state out: set before init(), which sanitizes it. rand() gave issues with low probs
 
     int tick;
 
@@ -193,8 +193,10 @@ void c_seed(Env* env, uint32_t seed){
 // Parses an ASCII map (maps.h) into grid geometry and the static cell sets,
 // allocates everything sized by the map, fills the padding border with WALL,
 // and precomputes obs_off. Asserts pad >= 2 and n_respawn >= num_agents.
-// Reads: map string. Writes: all of Env except the PufferLib buffers.
+// Reads: map string and env->rng as set by the caller. Writes: all of Env
+// except the PufferLib buffers.
 void init(Env* env){
+    c_seed(env, env->rng);
     const char *map[16] = {
         "AAA    A      A    AAA",
         "AA    AAA    AAA    AA",
@@ -577,17 +579,22 @@ void resolve_conflicts(Env* env){
 // Rewards agents whose RESOLVED destination holds an apple. Must run before
 // move_agents stamps over it. 
 void collect_apples(Env* env){
+    int n_collected = 0;
     for (int a = 0; a < env->num_agents; a++){
         const int32_t target_idx = env->target[a];
-        if (env->grid[target_idx] == APPLE){
-            env->rewards[a] += 1.0f;
-            env->grid[target_idx] = EMPTY;
-            // Logging
-            env->sum_ticks_apple_collected += (float)env->tick;
-            env->tot_apple_collected += 1.0f;
-            env->n_apple_alive--;
-            env->agent_returns[a] += 1.0f;
-        }
+        if (env->grid[target_idx] != APPLE) continue;
+        if (!env->shared_rewards) env->rewards[a] += 1.0f;
+        n_collected++;
+        env->grid[target_idx] = EMPTY;
+        // Logging
+        env->sum_ticks_apple_collected += (float)env->tick;
+        env->n_apple_alive--;
+        env->agent_returns[a] += 1.0f;
+    }
+    env->tot_apple_collected += (float)n_collected;
+    if (env->shared_rewards){
+        const float share = (float)n_collected/(float)env->num_agents;
+        for (int i = 0; i < env->num_agents; i++) env->rewards[i] = share;
     }
 };
 

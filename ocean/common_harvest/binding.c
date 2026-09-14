@@ -10,6 +10,8 @@ void my_init(Env* env, Dict* kwargs) {
     env->num_agents = dict_get(kwargs, "num_agents")->value;
     env->beam_blocks_movement = dict_get(kwargs, "beam_blocks_movement")->value;
     env->differentiate_other_agents_in_obs = dict_get(kwargs, "differentiate_other_agents_in_obs")->value;
+    env->shared_rewards = dict_get(kwargs, "shared_rewards")->value;
+    env->rng += (uint32_t)dict_get(kwargs, "rng")->value;  // my_vec_init preloads rng with the env index
     init(env);
 }
 
