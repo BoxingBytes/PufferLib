@@ -238,8 +238,6 @@ void init(Env* env){
     env->grid = (uint8_t*)calloc(tot_flattened, sizeof(uint8_t));
     memset(env->grid, WALL, tot_flattened*sizeof(uint8_t));
 
-    c_seed(env, 0x12345678);
-
     env->apple_idx = (int32_t*)calloc(64, sizeof(int32_t));
     env->n_apple = 0;
     env->respawn_idx = (int32_t*)calloc(60, sizeof(int32_t));
