@@ -97,9 +97,9 @@ void performance_test() {
 void demo() {
     Env env = {
         .num_agents = 7,
-        .differentiate_other_agents_in_obs = false,
+        .differentiate_other_agents_in_obs = true,
         .beam_blocks_movement = true,
-        .shared_rewards = false,
+        .shared_rewards = true,
         .rng = 42,
     };
     env.observations = (uint8_t*)calloc(env.num_agents*NUM_OBS_CHANNELS*OBS_WINDOW*OBS_WINDOW, sizeof(uint8_t));
@@ -130,6 +130,15 @@ void demo() {
         }
 
         c_step(&env);
+
+        float sum = 0.0f;
+        for (int a = 0; a < env.num_agents; a++) sum += env.rewards[a];
+        if (sum != 0.0f){
+            printf("t=%4d r:", env.tick);
+            for (int a = 0; a < env.num_agents; a++) printf(" %6.3f", env.rewards[a]);
+            printf(" | sum=%.3f apples=%d\n", sum, (int)env.tot_apple_collected);
+        }
+
         c_render(&env);
     }
     c_close(&env);
@@ -140,8 +149,75 @@ void demo() {
     free(env.actions);
 }
 
+// Every step, sum_a rewards[a] must equal the apples collected that step, in
+// both reward modes. Under shared_rewards all agents must also get equal shares.
+void test_rewards(bool shared_rewards) {
+    Env env = {
+        .num_agents = 7,
+        .differentiate_other_agents_in_obs = true,
+        .beam_blocks_movement = true,
+        .shared_rewards = shared_rewards,
+        .rng = 42,
+    };
+    env.observations = (uint8_t*)calloc(env.num_agents*NUM_OBS_CHANNELS*OBS_WINDOW*OBS_WINDOW, sizeof(uint8_t));
+    env.rewards = (float*)calloc(env.num_agents, sizeof(float));
+    env.terminals = (float*)calloc(env.num_agents, sizeof(float));
+    env.actions = (float*)calloc(env.num_agents, sizeof(float));
+
+    init(&env);
+    c_reset(&env);
+
+    const int num_episodes = 5;
+    int failures = 0;
+    float total_reward = 0.0f;
+    float prev_apples = 0.0f;
+
+    for (int step = 0; step < num_episodes*HORIZON; step++){
+        for (int a = 0; a < env.num_agents; a++) env.actions[a] = rand() % NUM_ACTIONS;
+        bool last = (env.tick == HORIZON - 1);
+        c_step(&env);
+
+        float sum = 0.0f;
+        for (int a = 0; a < env.num_agents; a++) sum += env.rewards[a];
+        total_reward += sum;
+
+        // c_reset zeroes the counter, so the delta is only readable mid-episode
+        if (!last){
+            float collected = env.tot_apple_collected - prev_apples;
+            if (fabsf(sum - collected) > 1e-3f){
+                if (failures < 5) printf("  FAIL t=%d sum(r)=%.4f apples=%.0f\n", env.tick, sum, collected);
+                failures++;
+            }
+            prev_apples = env.tot_apple_collected;
+        } else {
+            prev_apples = 0.0f;
+        }
+
+        if (shared_rewards){
+            for (int a = 1; a < env.num_agents; a++){
+                if (fabsf(env.rewards[a] - env.rewards[0]) > 1e-6f){
+                    if (failures < 5) printf("  FAIL t=%d unequal share a0=%.4f a%d=%.4f\n", env.tick, env.rewards[0], a, env.rewards[a]);
+                    failures++;
+                }
+            }
+        }
+    }
+
+    printf("shared_rewards=%d: %d failures over %d episodes\n", shared_rewards, failures, num_episodes);
+    printf("  logged mean episode_return = %.3f (n=%.0f)\n", env.log.episode_return/env.log.n, env.log.n);
+    printf("  sum of all rewards / (num_agents*episodes) = %.3f\n", total_reward/(env.num_agents*(float)num_episodes));
+
+    c_close(&env);
+    free(env.observations);
+    free(env.rewards);
+    free(env.terminals);
+    free(env.actions);
+}
+
 int main() {
-    demo();
+    // demo();
+    test_rewards(false);
+    test_rewards(true);
     // performance_test();
     return 0;
 }
