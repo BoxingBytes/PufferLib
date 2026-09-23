@@ -16,7 +16,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+typedef float obs_t;
+#include "pufferenv.h"
 #include "raylib.h"
+
+#define OBS_SIZE (NUM_OBS_CHANNELS*OBS_WINDOW*OBS_WINDOW)
+#define NUM_ATNS 1
+#define ACT_SIZES {NUM_ACTIONS}
 
 #define MAX_AGENTS 32
 #define HORIZON 1000 // SocialJax's num_inner_steps
@@ -195,7 +201,13 @@ void c_seed(Env* env, uint32_t seed){
 // and precomputes obs_off. Asserts pad >= 2 and n_respawn >= num_agents.
 // Reads: map string and env->rng as set by the caller. Writes: all of Env
 // except the PufferLib buffers.
-void init(Env* env){
+void puf_init(Env* env, Dict* kwargs){
+    env->num_agents = dict_get(kwargs, "num_agents");
+    env->beam_blocks_movement = dict_get(kwargs, "beam_blocks_movement");
+    env->differentiate_other_agents_in_obs = dict_get(kwargs, "differentiate_other_agents_in_obs");
+    env->shared_rewards = dict_get(kwargs, "shared_rewards");
+    env->rng += (uint32_t)dict_get(kwargs, "rng");  // my_vec_init preloads rng with the env index
+
     c_seed(env, env->rng);
     const char *map[16] = {
         "AAA    A      A    AAA",
@@ -328,7 +340,7 @@ void compute_observations(Env* env){
 
 
 // Matches SocialJax: agents 0 and 1 seat on the 2 'Q' cells, the rest on 'P'
-void c_reset(Env* env){
+void puf_reset(Env* env){
     env->tick = 0;
     memset(env->hit, 0, env->num_agents*sizeof(uint8_t));
     env->n_hit = 0;
@@ -392,6 +404,21 @@ float compute_equality(Env* env){
     if (sum == 0.0f) return 1.0f; // All agents have zero return, perfect equality
     return 1.0f - double_sum / (2.0f * env->num_agents * sum);
 };
+
+void puf_log(Log* log, Dict* out) {
+    dict_set(out, "time_to_depletion", log->time_to_depletion);
+    dict_set(out, "sustainability", log->sustainability);
+    dict_set(out, "efficiency", log->efficiency);
+    dict_set(out, "zap_rate", log->zap_rate);
+    dict_set(out, "hit_rate", log->hit_rate);
+    dict_set(out, "zap_timing", log->zap_timing);
+    dict_set(out, "hit_timing", log->hit_timing);
+    dict_set(out, "equality", log->equality);
+    dict_set(out, "perf", log->perf);
+    dict_set(out, "score", log->score);
+    dict_set(out, "episode_return", log->episode_return);
+    dict_set(out, "episode_length", log->episode_length);
+}
 
 void add_log(Env* env){
     if (env->n_apple_alive > 0) env->log.time_to_depletion += (float)HORIZON;
@@ -634,7 +661,7 @@ void fire_beams(Env* env){
     env->tot_hits += (float)env->n_hit;
 };
 
-void c_step(Env* env){
+void puf_step(Env* env){
     env->tick += 1;
     memset(env->observations, 0, env->num_agents*NUM_OBS_CHANNELS*OBS_WINDOW*OBS_WINDOW*sizeof(uint8_t));
     memset(env->rewards, 0, env->num_agents*sizeof(float));
@@ -656,7 +683,7 @@ void c_step(Env* env){
     if (env->tick >= HORIZON){
         add_log(env);
         for (int a = 0; a < env->num_agents; a++) env->terminals[a] = 1.0f;
-        c_reset(env);
+        puf_reset(env);
     }
 
     compute_observations(env);
@@ -713,7 +740,7 @@ static inline void draw_agent(Texture2D sheet, int x, int y, int size, int agent
 }
 
 // World (0,0) is top-left as reminder :D 
-void c_render(Env* env){
+void puf_render(Env* env){
     if (env->client == NULL){
         env->client = make_client(env);
     }
@@ -776,7 +803,7 @@ void close_client(Client* client){
     free(client);
 }
 
-void c_close(Env* env){
+void puf_close(Env* env){
     free(env->grid);
     free(env->apple_idx);
     free(env->respawn_idx);
