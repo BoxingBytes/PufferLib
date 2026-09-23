@@ -722,7 +722,6 @@ Client* make_client(Env* env){
     client->width  = (env->ascii_width + 2)*client->cell_size;
     client->height = (env->ascii_height + 2)*client->cell_size + HEADER_HEIGHT;
     InitWindow(client->width, client->height, "PufferLib Commons Harvest");
-    SetTargetFPS(10);
     client->puffers = LoadTexture("resources/shared/puffers.png");
     return client;
 }

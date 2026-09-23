@@ -23,7 +23,13 @@
 #include <string.h>
 #include <math.h>
 #include <assert.h>
+typedef uint8_t obs_t;
+#include "pufferenv.h"
 #include "raylib.h"
+
+#define OBS_SIZE (NUM_OBS_CHANNELS*OBS_WINDOW*OBS_WINDOW)
+#define NUM_ATNS 1
+#define ACT_SIZES {NUM_ACTIONS}
 
 #define MAX_AGENTS 16
 #define HORIZON 1000 // SocialJax's num_inner_steps
@@ -121,10 +127,8 @@ typedef struct Client Client;
 typedef struct Env Env;
 struct Env {
     // ------------------------------------------------ PufferLib interface
-    uint8_t* observations;  // (num_agents, NUM_OBS_CHANNELS, OBS_WINDOW, OBS_WINDOW)
-    float* actions;         // (num_agents,)
-    float* rewards;         // (num_agents,)
-    float* terminals;       // (num_agents,)
+    Agent agents[MAX_AGENTS];
+    int tag, boundary_reached;
     int num_agents;
     Log log;
     Client* client;
@@ -154,7 +158,8 @@ struct Env {
 
     // ---------------------------------------------------- step scratch
     int32_t *target;  // proposed then resolved destination cell
-    uint8_t *hit;     // (num_agents,) FLAGS, consumed by apply_respawns next step
+    uint8_t *hit;     // beamed this step, consumed by apply_respawns next step. Stores agent_ids
+    int n_hit;
 
     // ------------------------------------------------- static cell sets
     // Parsed once from the ASCII map (see init). Padded flat indices, kept so
@@ -222,7 +227,16 @@ void c_seed(Env* env, uint32_t seed){
     env->rng = (seed == 0) ? 1 : seed;
 }
 
-void init(Env* env){
+void puf_init(Env* env, Dict* kwargs){
+    env->num_agents = dict_get(kwargs, "num_agents");
+    if (env->num_agents <= 0 || env->num_agents > MAX_AGENTS){
+        printf("cleanup: num_agents=%d out of range (1..%d)\n", env->num_agents, MAX_AGENTS);
+        exit(1);
+    }
+    env->differentiate_other_agents_in_obs = dict_get(kwargs, "differentiate_other_agents_in_obs");
+    env->shared_rewards = dict_get(kwargs, "shared_rewards");
+    env->rng += (uint32_t)dict_get(kwargs, "rng");  // my_vec_init preloads rng with the env index
+
     c_seed(env, env->rng);
     const char *map[MAP_HEIGHT] = {
         "CDDDCDDCDCDCDCDCDCDCCDCDDDCD",
@@ -254,7 +268,6 @@ void init(Env* env){
     env->pad = OBS_WINDOW - 1; //Because obs start one cell behind the agent
     env->stride = env->ascii_width + 2*env->pad;
     assert(env->pad >= 2);
-    assert(env->num_agents > 0 && env->num_agents <= MAX_AGENTS);
 
     // Observation windows sweep from "left-to-right" relative to agent dir, from behind to ahead.
     for (int d = 0; d < NUM_DIRS; d++){
@@ -282,7 +295,8 @@ void init(Env* env){
     env->agents_idx = (int32_t*)calloc(env->num_agents, sizeof(int32_t));
     env->agents_dir = (uint8_t*)calloc(env->num_agents, sizeof(uint8_t));
     env->target = (int32_t*)calloc(env->num_agents, sizeof(int32_t));
-    env->hit = (uint8_t*)calloc(env->num_agents, sizeof(uint8_t));
+    env->hit = (uint8_t*)calloc(env->num_agents*BEAM_MASK_SIZE, sizeof(uint8_t));
+    env->n_hit = 0;
     env->beam_idx = (int32_t*)calloc(BEAM_MASK_SIZE*env->num_agents, sizeof(int32_t));
     env->n_beam = 0;
 
@@ -324,6 +338,11 @@ void init(Env* env){
     assert(n_river == N_RIVER);
     assert(n_spawn == N_SPAWN);
 
+    for (int a = 0; a < env->num_agents; a++){
+        env->agents[a].policy = 0;
+        env->agents[a].action_mask = NULL;
+    }
+
     // Logging
     env->agent_returns = (float*)calloc(env->num_agents, sizeof(float));
 };
@@ -332,9 +351,9 @@ void compute_observations(Env* env){
     const int32_t plane_size = OBS_WINDOW*OBS_WINDOW;
 
     for (int a = 0; a < env->num_agents; a++){
-        const int32_t channel0_base = a*NUM_OBS_CHANNELS*plane_size;
-        const int32_t channel1_base = channel0_base + plane_size;
-        const int32_t channel2_base = channel1_base + plane_size;
+        const int32_t channel0_base = 0;
+        const int32_t channel1_base = plane_size;
+        const int32_t channel2_base = 2*plane_size;
 
         const int32_t agent_idx = env->agents_idx[a];
         const uint8_t agent_dir = env->agents_dir[a];
@@ -355,15 +374,15 @@ void compute_observations(Env* env){
 
                     if (env->differentiate_other_agents_in_obs){
                         // Encoding both agent_id & direction in one go, bad idea?
-                        env->observations[channel2_base + k] = 1 + 4*other_agent_id + rel_dir;
+                        env->agents[a].observations[channel2_base + k] = 1 + 4*other_agent_id + rel_dir;
                     } else {
-                        env->observations[channel2_base + k] = 1 + rel_dir;
+                        env->agents[a].observations[channel2_base + k] = 1 + rel_dir;
                     }
 
                     cell_content = AGENT_BASE; // For channel 0
                 }
-                env->observations[channel0_base + k] = cell_content;
-                env->observations[channel1_base + k] = env->terrain[cell_idx];
+                env->agents[a].observations[channel0_base + k] = cell_content;
+                env->agents[a].observations[channel1_base + k] = env->terrain[cell_idx];
             }
         }
     };
@@ -376,15 +395,16 @@ void update_dirt_fraction(Env* env){
     env->apple_growth_p = MAX_APPLE_GROWTH_RATE*(1.0f - env->dirt_fraction/THRESHOLD_DEPLETION);
 };
 
-void c_reset(Env* env){
+void puf_reset(Env* env){
     env->tick = 0;
-    memset(env->hit, 0, env->num_agents*sizeof(uint8_t));
+    memset(env->hit, 0, env->num_agents*BEAM_MASK_SIZE*sizeof(uint8_t));
+    env->n_hit = 0;
     memset(env->target, 0, env->num_agents*sizeof(int32_t));
     memset(env->beam_idx, 0, BEAM_MASK_SIZE*env->num_agents*sizeof(int32_t));
     env->n_beam = 0;
 
-    // Puffer
-    memset(env->observations, 0, env->num_agents*NUM_OBS_CHANNELS*OBS_WINDOW*OBS_WINDOW*sizeof(uint8_t));
+    // PufferLib allocates all buffers contiguously, so we can do that
+    memset(env->agents[0].observations, 0, env->num_agents*OBS_SIZE*sizeof(obs_t));
 
     // Rebuild both layers
     const int offset = env->stride*env->pad + env->pad;
@@ -448,6 +468,24 @@ float compute_equality(Env* env){
     return 1.0f - double_sum / (2.0f * env->num_agents * sum);
 };
 
+void puf_log(Log* log, Dict* out) {
+    dict_set(out, "time_to_growth", log->time_to_growth);
+    dict_set(out, "mean_dirt_fraction", log->mean_dirt_fraction);
+    dict_set(out, "clean_rate", log->clean_rate);
+    dict_set(out, "clean_hit_rate", log->clean_hit_rate);
+    dict_set(out, "sustainability", log->sustainability);
+    dict_set(out, "efficiency", log->efficiency);
+    dict_set(out, "zap_rate", log->zap_rate);
+    dict_set(out, "hit_rate", log->hit_rate);
+    dict_set(out, "zap_timing", log->zap_timing);
+    dict_set(out, "hit_timing", log->hit_timing);
+    dict_set(out, "equality", log->equality);
+    dict_set(out, "perf", log->perf);
+    dict_set(out, "score", log->score);
+    dict_set(out, "episode_return", log->episode_return);
+    dict_set(out, "episode_length", log->episode_length);
+}
+
 void add_log(Env* env){
     const float agent_steps = env->num_agents*(float)HORIZON;
 
@@ -488,9 +526,8 @@ void add_log(Env* env){
 };
 
 void apply_respawns(Env* env){
-    for (int a = 0; a < env->num_agents; a++){
-        if (!env->hit[a]) continue;
-        env->hit[a] = 0;
+    for (int i = 0; i < env->n_hit; i++){
+        const int32_t a = env->hit[i];
         int32_t respawn_cell;
         do {
             respawn_cell = env->respawn_idx[rnd(env) % N_SPAWN];
@@ -500,9 +537,10 @@ void apply_respawns(Env* env){
         env->agents_dir[a] = (rnd(env) % (NUM_DIRS - 1)) + 1; // 1..3, never 0 = original SocialJax
         env->grid[respawn_cell] = AGENT_BASE + a;
     }
+    env->n_hit = 0;
 };
 
-// Every apple has apple_regrow_p chance to regrow. 
+// Every apple has apple_regrow_p chance to regrow.
 void apple_regrow(Env* env){
     if (env->apple_growth_p <= 0.0f) return;
 
@@ -541,7 +579,7 @@ void compute_targets(Env* env){
     for (int a = 0; a < env->num_agents; a++){
         const int32_t agent_idx = env->agents_idx[a];
         const uint8_t agent_dir = env->agents_dir[a];
-        const int32_t action = (int32_t)env->actions[a];
+        const int32_t action = (int32_t)env->agents[a].actions[0];
 
         int32_t target_idx = agent_idx;
         uint8_t new_dir = agent_dir;
@@ -630,7 +668,7 @@ void collect_apples(Env* env){
     for (int a = 0; a < env->num_agents; a++){
         const int32_t target_idx = env->target[a];
         if (env->grid[target_idx] != APPLE) continue;
-        if (!env->shared_rewards) env->rewards[a] += 1.0f;
+        if (!env->shared_rewards) env->agents[a].rewards[0] += 1.0f;
         n_collected++;
         env->grid[target_idx] = EMPTY;
         env->dead_apple_idx[env->n_dead++] = target_idx;
@@ -640,7 +678,7 @@ void collect_apples(Env* env){
     }
     env->tot_apple_collected += (float)n_collected;
     if (env->shared_rewards){
-        for (int i = 0; i < env->num_agents; i++) env->rewards[i] = (float)n_collected;
+        for (int i = 0; i < env->num_agents; i++) env->agents[i].rewards[0] = (float)n_collected;
     }
 };
 
@@ -659,7 +697,7 @@ void move_agents(Env* env){
 // ACTION_ZAP.
 void fire_beams(Env* env){
     for (int a = 0; a < env->num_agents; a++){
-        if ((int32_t)env->actions[a] != ACTION_ZAP) continue;
+        if ((int32_t)env->agents[a].actions[0] != ACTION_ZAP) continue;
 
         env->tot_zaps += 1.0f;
         env->sum_ticks_zap += (float)env->tick; // Logging
@@ -672,22 +710,20 @@ void fire_beams(Env* env){
             env->beam_idx[env->n_beam++] = cell_idx;
             if (env->grid[cell_idx] >= AGENT_BASE){
                 const int32_t victim_id = env->grid[cell_idx] - AGENT_BASE;
-                if (env->hit[victim_id]) continue; // A second beam this step changes nothing
-                env->hit[victim_id] = 1;
-                // Logging
-                env->tot_hits += 1.0f;
-                env->sum_ticks_hit += (float)env->tick;
+                env->hit[env->n_hit++] = victim_id;
+                env->sum_ticks_hit += (float)env->tick; // Logging
             } else if (env->grid[cell_idx] == EMPTY){
                 env->grid[cell_idx] = BEAM;
             }
         }
     }
+    env->tot_hits += (float)env->n_hit;
 };
 
 // ACTION_CLEAN.
 void fire_clean_beams(Env* env){
     for (int a = 0; a < env->num_agents; a++){
-        if ((int32_t)env->actions[a] != ACTION_CLEAN) continue;
+        if ((int32_t)env->agents[a].actions[0] != ACTION_CLEAN) continue;
 
         env->tot_cleans += 1.0f; // Logging
 
@@ -707,11 +743,12 @@ void fire_clean_beams(Env* env){
     }
 };
 
-void c_step(Env* env){
+void puf_step(Env* env){
     env->tick += 1;
-    memset(env->observations, 0, env->num_agents*NUM_OBS_CHANNELS*OBS_WINDOW*OBS_WINDOW*sizeof(uint8_t));
-    memset(env->rewards, 0, env->num_agents*sizeof(float));
-    memset(env->terminals, 0, env->num_agents*sizeof(float));
+    // PufferLib allocates all buffers contiguously, so we can do that
+    memset(env->agents[0].observations, 0, env->num_agents*OBS_SIZE*sizeof(obs_t));
+    memset(env->agents[0].rewards, 0, env->num_agents*sizeof(float));
+    memset(env->agents[0].terminals, 0, env->num_agents*sizeof(float));
 
     apply_respawns(env);
     update_dirt_fraction(env);
@@ -733,8 +770,8 @@ void c_step(Env* env){
 
     if (env->tick >= HORIZON){
         add_log(env);
-        for (int a = 0; a < env->num_agents; a++) env->terminals[a] = 1.0f;
-        c_reset(env);
+        for (int a = 0; a < env->num_agents; a++) env->agents[a].terminals[0] = 1.0f;
+        puf_reset(env);
     }
 
     compute_observations(env);
@@ -767,7 +804,6 @@ Client* make_client(Env* env){
     client->width  = (env->ascii_width + 2)*client->cell_size;
     client->height = (env->ascii_height + 2)*client->cell_size + HEADER_HEIGHT;
     InitWindow(client->width, client->height, "PufferLib Clean Up");
-    SetTargetFPS(60);
     client->puffers = LoadTexture("resources/shared/puffers.png");
     return client;
 }
@@ -803,7 +839,7 @@ static inline Color terrain_color(uint8_t cell){
 }
 
 // World (0,0) is top-left as reminder :D
-void c_render(Env* env){
+void puf_render(Env* env){
     if (env->client == NULL){
         env->client = make_client(env);
     }
@@ -872,7 +908,7 @@ void close_client(Client* client){
     free(client);
 };
 
-void c_close(Env* env){
+void puf_close(Env* env){
     free(env->grid);
     free(env->terrain);
     free(env->apple_idx);
