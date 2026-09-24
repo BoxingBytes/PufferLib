@@ -151,6 +151,12 @@ struct Env {
     // ------------------------------------------------------------ config
     bool differentiate_other_agents_in_obs;  // default true
     bool shared_rewards;          // default true (SocialJax's default here)
+    bool inequity_aversion;       // default true
+    bool inequity_aversion_smoothed;  // default true, eq.4 trace vs raw reward
+    float inequity_aversion_gamma;
+    float inequity_aversion_lambda;
+    float inequity_aversion_alpha;  // disadvantageous (others > self) coefficient
+    float inequity_aversion_beta;   // advantageous (self > others) coefficient
 
     // ------------------------------------------------------------ agents
     int32_t *agents_idx;  // padded flat cell index
@@ -204,6 +210,8 @@ struct Env {
     float sum_ticks_hit;             // For computing hit_timing
     float tick_growth;               // Tick dirt_fraction first dropped below the threshold, 0 if never
     float *agent_returns;            // For computing equality
+
+    float *smoothed_rewards;  // eq.4 eligibility trace e_i^t, (num_agents,)
 };
 
 // ================================================================== rng
@@ -235,6 +243,16 @@ void puf_init(Env* env, Dict* kwargs){
     }
     env->differentiate_other_agents_in_obs = dict_get(kwargs, "differentiate_other_agents_in_obs");
     env->shared_rewards = dict_get(kwargs, "shared_rewards");
+    env->inequity_aversion = dict_get(kwargs, "inequity_aversion");
+    env->inequity_aversion_smoothed = dict_get(kwargs, "inequity_aversion_smoothed");
+    env->inequity_aversion_gamma = dict_get(kwargs, "inequity_aversion_gamma");
+    env->inequity_aversion_lambda = dict_get(kwargs, "inequity_aversion_lambda");
+    env->inequity_aversion_alpha = dict_get(kwargs, "inequity_aversion_alpha");
+    env->inequity_aversion_beta = dict_get(kwargs, "inequity_aversion_beta");
+    if (env->inequity_aversion && env->shared_rewards){
+        printf("cleanup: inequity_aversion and shared_rewards are mutually exclusive (shared_rewards makes all rewards equal, so inequity_aversion is a no-op)\n");
+        exit(1);
+    }
     env->rng += (uint32_t)dict_get(kwargs, "rng");  // my_vec_init preloads rng with the env index
 
     c_seed(env, env->rng);
@@ -345,6 +363,8 @@ void puf_init(Env* env, Dict* kwargs){
 
     // Logging
     env->agent_returns = (float*)calloc(env->num_agents, sizeof(float));
+
+    env->smoothed_rewards = (float*)calloc(env->num_agents, sizeof(float));
 };
 
 void compute_observations(Env* env){
@@ -450,6 +470,7 @@ void puf_reset(Env* env){
     env->sum_ticks_hit = 0.0f;
     env->tick_growth = 0.0f;
     memset(env->agent_returns, 0, env->num_agents*sizeof(float));
+    memset(env->smoothed_rewards, 0, env->num_agents*sizeof(float));
 
     compute_observations(env);
 };
@@ -743,6 +764,37 @@ void fire_clean_beams(Env* env){
     }
 };
 
+// Rewrites env->agents[*].rewards[0] into inequity-averse subjective rewards
+// (Hughes et al. eq. 3). If inequity_aversion_smoothed, compares agents'
+// eligibility traces e_i (eq. 4) instead of their raw step rewards.
+void get_inequity_aversion_rewards(Env* env){
+    if (!env->inequity_aversion) return;
+
+    float e[MAX_AGENTS];
+    for (int a = 0; a < env->num_agents; a++){
+        if (env->inequity_aversion_smoothed){
+            env->smoothed_rewards[a] = env->inequity_aversion_gamma*env->inequity_aversion_lambda*env->smoothed_rewards[a]
+                + env->agents[a].rewards[0];
+            e[a] = env->smoothed_rewards[a];
+        } else {
+            e[a] = env->agents[a].rewards[0];
+        }
+    }
+
+    const float inv_n_others = 1.0f / (float)(env->num_agents - 1);
+    for (int i = 0; i < env->num_agents; i++){
+        float disadvantageous = 0.0f;
+        float advantageous = 0.0f;
+        for (int j = 0; j < env->num_agents; j++){
+            if (j == i) continue;
+            disadvantageous += fmaxf(e[j] - e[i], 0.0f);
+            advantageous += fmaxf(e[i] - e[j], 0.0f);
+        }
+        env->agents[i].rewards[0] -= inv_n_others*(env->inequity_aversion_alpha*disadvantageous
+            + env->inequity_aversion_beta*advantageous);
+    }
+};
+
 void puf_step(Env* env){
     env->tick += 1;
     // PufferLib allocates all buffers contiguously, so we can do that
@@ -758,6 +810,7 @@ void puf_step(Env* env){
     compute_targets(env);
     resolve_conflicts(env);
     collect_apples(env);
+    get_inequity_aversion_rewards(env);
     move_agents(env);
     fire_beams(env);
     fire_clean_beams(env);
@@ -924,6 +977,7 @@ void puf_close(Env* env){
     free(env->hit);
     free(env->beam_idx);
     free(env->agent_returns);
+    free(env->smoothed_rewards);
     if (env->client != NULL){
         close_client(env->client);
     }
