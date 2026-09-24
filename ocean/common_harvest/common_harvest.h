@@ -1,14 +1,8 @@
 // Commons Harvest Open -- C port of SocialJax's harvest_open.py
 //
-// Deliberate divergences from the SocialJax reference (Most are bugs there):
-//   1. Actions are EGOCENTRIC (w.r.t agent_heading). SocialJax's STEP_MOVE ignores agent heading
-//   2. No inventory. SocialJax's inv system is never used, same for freeze
-//   3. Beam targets are bounds-safe. In socialJax, an agent facing the
-//      grid edge & fires kills itself.
-//   4. Observations are not one-hot. One-hot / embedding is the
-//      policy's job.
-//   5. Individual reward, 1.0 per apple, no scaling by num_agents, and no
-//      zeroing of the reward on the episode's final step.
+// Main divergences from the SocialJax reference:
+//   1. Actions are EGOCENTRIC (w.r.t agent_heading)
+//   2. Observations are not one-hot. We delegate this to policy
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -125,6 +119,12 @@ struct Env {
     bool beam_blocks_movement;    // default true
     bool differentiate_other_agents_in_obs;  // default true
     bool shared_rewards;          // default false
+    bool inequity_aversion;       // default true
+    bool inequity_aversion_smoothed;  // default true, eq.4 trace vs raw reward
+    float inequity_aversion_gamma;
+    float inequity_aversion_lambda;
+    float inequity_aversion_alpha;  // disadvantageous (others > self) coefficient
+    float inequity_aversion_beta;   // advantageous (self > others) coefficient
 
     // ------------------------------------------------------------ agents
     int32_t *agents_idx;  // padded flat cell index
@@ -169,6 +169,8 @@ struct Env {
     float sum_ticks_zap; // For computing zap_timing
     float sum_ticks_hit; // For computing hit_timing
     float *agent_returns; // For computing equality
+
+    float *smoothed_rewards;  // eq.4 eligibility trace e_i^t, (num_agents,)
 };
 
 // ================================================================== rng
@@ -208,6 +210,16 @@ void puf_init(Env* env, Dict* kwargs){
     env->beam_blocks_movement = dict_get(kwargs, "beam_blocks_movement");
     env->differentiate_other_agents_in_obs = dict_get(kwargs, "differentiate_other_agents_in_obs");
     env->shared_rewards = dict_get(kwargs, "shared_rewards");
+    env->inequity_aversion = dict_get(kwargs, "inequity_aversion");
+    env->inequity_aversion_smoothed = dict_get(kwargs, "inequity_aversion_smoothed");
+    env->inequity_aversion_gamma = dict_get(kwargs, "inequity_aversion_gamma");
+    env->inequity_aversion_lambda = dict_get(kwargs, "inequity_aversion_lambda");
+    env->inequity_aversion_alpha = dict_get(kwargs, "inequity_aversion_alpha");
+    env->inequity_aversion_beta = dict_get(kwargs, "inequity_aversion_beta");
+    if (env->inequity_aversion && env->shared_rewards){
+        printf("common_harvest: Can't have both inequity_aversion and shared_rewards True.\n");
+        exit(1);
+    }
     env->rng += (uint32_t)dict_get(kwargs, "rng");  // my_vec_init preloads rng with the env index
 
     c_seed(env, env->rng);
@@ -300,6 +312,8 @@ void puf_init(Env* env, Dict* kwargs){
 
     // Logging
     env->agent_returns = (float*)calloc(env->num_agents, sizeof(float));
+
+    env->smoothed_rewards = (float*)calloc(env->num_agents, sizeof(float));
 };
 
 
@@ -395,6 +409,7 @@ void puf_reset(Env* env){
     env->sum_ticks_zap = 0.0f;
     env->sum_ticks_hit = 0.0f;
     memset(env->agent_returns, 0, env->num_agents*sizeof(float));
+    memset(env->smoothed_rewards, 0, env->num_agents*sizeof(float));
 
     compute_observations(env);
 };
@@ -669,6 +684,35 @@ void fire_beams(Env* env){
     env->tot_hits += (float)env->n_hit;
 };
 
+// (Hughes et al. 2019)
+void get_inequity_aversion_rewards(Env* env){
+    if (!env->inequity_aversion) return;
+
+    float e[MAX_AGENTS];
+    for (int a = 0; a < env->num_agents; a++){
+        if (env->inequity_aversion_smoothed){
+            env->smoothed_rewards[a] = env->inequity_aversion_gamma*env->inequity_aversion_lambda*env->smoothed_rewards[a]
+                + env->agents[a].rewards[0];
+            e[a] = env->smoothed_rewards[a];
+        } else {
+            e[a] = env->agents[a].rewards[0];
+        }
+    }
+
+    const float inv_n_others = 1.0f / (float)(env->num_agents - 1);
+    for (int i = 0; i < env->num_agents; i++){
+        float disadvantageous = 0.0f;
+        float advantageous = 0.0f;
+        for (int j = 0; j < env->num_agents; j++){
+            if (j == i) continue;
+            disadvantageous += fmaxf(e[j] - e[i], 0.0f);
+            advantageous += fmaxf(e[i] - e[j], 0.0f);
+        }
+        env->agents[i].rewards[0] -= inv_n_others*(env->inequity_aversion_alpha*disadvantageous
+            + env->inequity_aversion_beta*advantageous);
+    }
+};
+
 void puf_step(Env* env){
     env->tick += 1;
     // PufferLib allocates all buffers contiguously, so we can do that
@@ -682,6 +726,12 @@ void puf_step(Env* env){
     compute_targets(env);
     resolve_conflicts(env);
     collect_apples(env);
+    get_inequity_aversion_rewards(env);
+    printf("Rewards: ");
+    for (int a = 0; a < env->num_agents; a++){
+        printf("%.4f ", env->agents[a].rewards[0]);
+    }
+    printf("\n");
     move_agents(env);
     if (env->beam_blocks_movement) beam_clear(env);
     fire_beams(env);
@@ -708,7 +758,6 @@ const Color BEAM_COLOR  = (Color){255, 255, 153, 255};  // pale yellow
 #define HEADER_LINE_HEIGHT 24
 #define HEADER_HEIGHT (2*HEADER_LINE_HEIGHT)
 #define HEADER_MARGIN 10
-
 struct Client {
     int cell_size;
     int width;   // window width in pixels
@@ -823,6 +872,7 @@ void puf_close(Env* env){
     free(env->hit);
     free(env->beam_idx);
     free(env->agent_returns);
+    free(env->smoothed_rewards);
     if (env->client != NULL){
         close_client(env->client);
     }
