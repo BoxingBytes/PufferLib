@@ -727,11 +727,6 @@ void puf_step(Env* env){
     resolve_conflicts(env);
     collect_apples(env);
     get_inequity_aversion_rewards(env);
-    printf("Rewards: ");
-    for (int a = 0; a < env->num_agents; a++){
-        printf("%.4f ", env->agents[a].rewards[0]);
-    }
-    printf("\n");
     move_agents(env);
     if (env->beam_blocks_movement) beam_clear(env);
     fire_beams(env);
