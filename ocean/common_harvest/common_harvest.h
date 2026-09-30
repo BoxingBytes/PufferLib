@@ -116,11 +116,11 @@ struct Env {
     int32_t col_stride[NUM_DIRS];  // flat relative index of the next col in the obs window
 
     // ------------------------------------------------------------ config
-    bool beam_blocks_movement;    // default true
-    bool differentiate_other_agents_in_obs;  // default true
-    bool shared_rewards;          // default false
-    bool inequity_aversion;       // default true
-    bool inequity_aversion_smoothed;  // default true, eq.4 trace vs raw reward
+    bool beam_blocks_movement;    
+    bool differentiate_other_agents_in_obs;  
+    bool shared_rewards;          
+    bool inequity_aversion;       
+    bool inequity_aversion_smoothed;  
     float inequity_aversion_gamma;
     float inequity_aversion_lambda;
     float inequity_aversion_alpha;  // disadvantageous (others > self) coefficient
