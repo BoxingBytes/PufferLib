@@ -169,6 +169,7 @@ struct Env {
     float sum_ticks_zap; // For computing zap_timing
     float sum_ticks_hit; // For computing hit_timing
     float tot_clipped_rewards; // Agent-steps with |reward| > 1, PufferLib clamps to [-1, 1]
+    float tick_depletion; // Tick apples hit 0, 0 if never
     float *agent_returns; // For computing equality
 
     float *smoothed_rewards;  // eq.4 eligibility trace e_i^t, (num_agents,)
@@ -409,6 +410,7 @@ void puf_reset(Env* env){
     env->sum_ticks_zap = 0.0f;
     env->sum_ticks_hit = 0.0f;
     env->tot_clipped_rewards = 0.0f;
+    env->tick_depletion = 0.0f;
     memset(env->agent_returns, 0, env->num_agents*sizeof(float));
     memset(env->smoothed_rewards, 0, env->num_agents*sizeof(float));
 
@@ -446,7 +448,7 @@ void puf_log(Log* log, Dict* out) {
 }
 
 void add_log(Env* env){
-    if (env->n_apple_alive > 0) env->log.time_to_depletion += (float)HORIZON;
+    env->log.time_to_depletion += (env->tick_depletion == 0.0f) ? (float)HORIZON : env->tick_depletion;
 
     if (env->tot_apple_collected == 0.0f){
         env->log.sustainability += (float)HORIZON;
@@ -740,7 +742,7 @@ void puf_step(Env* env){
     fire_beams(env);
 
     // Logging
-    if (env->n_apple_alive == 0 && env->log.time_to_depletion == 0) env->log.time_to_depletion = (float)env->tick;
+    if (env->tick_depletion == 0.0f && env->n_apple_alive == 0) env->tick_depletion = (float)env->tick;
 
     if (env->tick >= HORIZON){
         add_log(env);
