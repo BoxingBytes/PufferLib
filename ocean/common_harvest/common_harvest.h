@@ -87,6 +87,7 @@ typedef struct Log {
     float score;
     float episode_return;
     float episode_length;
+    float clipped_reward_rate;
     float n;
 } Log;
 
@@ -121,8 +122,7 @@ struct Env {
     bool shared_rewards;          
     bool inequity_aversion;       
     bool inequity_aversion_smoothed;  
-    float inequity_aversion_gamma;
-    float inequity_aversion_lambda;
+    float inequity_aversion_lambda; // Trace decay, replaces Hughes' gamma*lambda
     float inequity_aversion_alpha;  // disadvantageous (others > self) coefficient
     float inequity_aversion_beta;   // advantageous (self > others) coefficient
 
@@ -168,6 +168,7 @@ struct Env {
     float tot_hits;
     float sum_ticks_zap; // For computing zap_timing
     float sum_ticks_hit; // For computing hit_timing
+    float tot_clipped_rewards; // Agent-steps with |reward| > 1, PufferLib clamps to [-1, 1]
     float *agent_returns; // For computing equality
 
     float *smoothed_rewards;  // eq.4 eligibility trace e_i^t, (num_agents,)
@@ -212,7 +213,6 @@ void puf_init(Env* env, Dict* kwargs){
     env->shared_rewards = dict_get(kwargs, "shared_rewards");
     env->inequity_aversion = dict_get(kwargs, "inequity_aversion");
     env->inequity_aversion_smoothed = dict_get(kwargs, "inequity_aversion_smoothed");
-    env->inequity_aversion_gamma = dict_get(kwargs, "inequity_aversion_gamma");
     env->inequity_aversion_lambda = dict_get(kwargs, "inequity_aversion_lambda");
     env->inequity_aversion_alpha = dict_get(kwargs, "inequity_aversion_alpha");
     env->inequity_aversion_beta = dict_get(kwargs, "inequity_aversion_beta");
@@ -408,6 +408,7 @@ void puf_reset(Env* env){
     env->tot_hits = 0.0f;
     env->sum_ticks_zap = 0.0f;
     env->sum_ticks_hit = 0.0f;
+    env->tot_clipped_rewards = 0.0f;
     memset(env->agent_returns, 0, env->num_agents*sizeof(float));
     memset(env->smoothed_rewards, 0, env->num_agents*sizeof(float));
 
@@ -441,6 +442,7 @@ void puf_log(Log* log, Dict* out) {
     dict_set(out, "score", log->score);
     dict_set(out, "episode_return", log->episode_return);
     dict_set(out, "episode_length", log->episode_length);
+    dict_set(out, "clipped_reward_rate", log->clipped_reward_rate);
 }
 
 void add_log(Env* env){
@@ -467,6 +469,7 @@ void add_log(Env* env){
     env->log.efficiency += env->tot_apple_collected / (float)HORIZON;
     env->log.zap_rate += env->tot_zaps / (env->num_agents * (float)HORIZON);
     env->log.hit_rate += env->tot_hits / (env->num_agents * (float)HORIZON);
+    env->log.clipped_reward_rate += env->tot_clipped_rewards / (env->num_agents * (float)HORIZON);
 
     env->log.perf += env->tot_apple_collected/(env->num_agents*HORIZON); // Loose
     env->log.score += env->tot_apple_collected;
@@ -691,7 +694,7 @@ void get_inequity_aversion_rewards(Env* env){
     float e[MAX_AGENTS];
     for (int a = 0; a < env->num_agents; a++){
         if (env->inequity_aversion_smoothed){
-            env->smoothed_rewards[a] = env->inequity_aversion_gamma*env->inequity_aversion_lambda*env->smoothed_rewards[a]
+            env->smoothed_rewards[a] = env->inequity_aversion_lambda*env->smoothed_rewards[a]
                 + env->agents[a].rewards[0];
             e[a] = env->smoothed_rewards[a];
         } else {
@@ -699,7 +702,9 @@ void get_inequity_aversion_rewards(Env* env){
         }
     }
 
-    const float inv_n_others = 1.0f / (float)(env->num_agents - 1);
+    // Trace sums ~1/(1-lambda) steps, keeps alpha/beta in per-step reward units
+    const float trace_scale = env->inequity_aversion_smoothed ? 1.0f - env->inequity_aversion_lambda : 1.0f;
+    const float penalty_scale = trace_scale / (float)(env->num_agents - 1);
     for (int i = 0; i < env->num_agents; i++){
         float disadvantageous = 0.0f;
         float advantageous = 0.0f;
@@ -708,7 +713,7 @@ void get_inequity_aversion_rewards(Env* env){
             disadvantageous += fmaxf(e[j] - e[i], 0.0f);
             advantageous += fmaxf(e[i] - e[j], 0.0f);
         }
-        env->agents[i].rewards[0] -= inv_n_others*(env->inequity_aversion_alpha*disadvantageous
+        env->agents[i].rewards[0] -= penalty_scale*(env->inequity_aversion_alpha*disadvantageous
             + env->inequity_aversion_beta*advantageous);
     }
 };
@@ -727,6 +732,9 @@ void puf_step(Env* env){
     resolve_conflicts(env);
     collect_apples(env);
     get_inequity_aversion_rewards(env);
+    for (int a = 0; a < env->num_agents; a++){
+        if (fabsf(env->agents[a].rewards[0]) > 1.0f) env->tot_clipped_rewards += 1.0f;
+    }
     move_agents(env);
     if (env->beam_blocks_movement) beam_clear(env);
     fire_beams(env);
