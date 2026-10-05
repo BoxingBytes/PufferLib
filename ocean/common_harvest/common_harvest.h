@@ -20,7 +20,7 @@ typedef uint8_t obs_t;
 
 #define MAX_AGENTS 32
 #define HORIZON 1000 // SocialJax's num_inner_steps
-#define ZAP_REWARD 0.05f
+#define ZAP_REWARD -0.05f
 #define ZAPPED_REWARD -1.0f
 // ---------------------------------------------------------------- grid codes
 #define EMPTY       0
@@ -737,10 +737,10 @@ void puf_step(Env* env){
     compute_targets(env);
     resolve_conflicts(env);
     collect_apples(env);
-    get_inequity_aversion_rewards(env);
     move_agents(env);
     if (env->beam_blocks_movement) beam_clear(env);
     fire_beams(env);
+    get_inequity_aversion_rewards(env);
 
     // Logging
     if (env->tick_depletion == 0.0f && env->n_apple_alive == 0) env->tick_depletion = (float)env->tick;
