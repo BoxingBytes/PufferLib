@@ -33,6 +33,8 @@ typedef uint8_t obs_t;
 
 #define MAX_AGENTS 16
 #define HORIZON 1000 // SocialJax's num_inner_steps
+#define ZAP_REWARD 0.05f
+#define ZAPPED_REWARD -1.0f
 
 // ---------------------------------------------------------------- grid codes
 #define EMPTY       0
@@ -736,6 +738,8 @@ void fire_beams(Env* env){
             if (env->grid[cell_idx] >= AGENT_BASE){
                 const int32_t victim_id = env->grid[cell_idx] - AGENT_BASE;
                 env->hit[env->n_hit++] = victim_id;
+                env->agents[victim_id].rewards[0] += ZAPPED_REWARD;
+                env->agents[a].rewards[0] += ZAP_REWARD;
                 env->sum_ticks_hit += (float)env->tick; // Logging
             } else if (env->grid[cell_idx] == EMPTY){
                 env->grid[cell_idx] = BEAM;

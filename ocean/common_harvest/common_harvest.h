@@ -20,6 +20,8 @@ typedef uint8_t obs_t;
 
 #define MAX_AGENTS 32
 #define HORIZON 1000 // SocialJax's num_inner_steps
+#define ZAP_REWARD 0.05f
+#define ZAPPED_REWARD -1.0f
 // ---------------------------------------------------------------- grid codes
 #define EMPTY       0
 #define WALL        1   
@@ -680,6 +682,8 @@ void fire_beams(Env* env){
             if (env->grid[cell_idx] >= AGENT_BASE){
                 const int32_t victim_id = env->grid[cell_idx] - AGENT_BASE;
                 env->hit[env->n_hit++] = victim_id;
+                env->agents[victim_id].rewards[0] += ZAPPED_REWARD;
+                env->agents[a].rewards[0] += ZAP_REWARD;
                 env->sum_ticks_hit += (float)env->tick; // Logging
             } else if (env->grid[cell_idx] == EMPTY){
                 env->grid[cell_idx] = BEAM;
@@ -734,15 +738,15 @@ void puf_step(Env* env){
     resolve_conflicts(env);
     collect_apples(env);
     get_inequity_aversion_rewards(env);
-    for (int a = 0; a < env->num_agents; a++){
-        if (fabsf(env->agents[a].rewards[0]) > 1.0f) env->tot_clipped_rewards += 1.0f;
-    }
     move_agents(env);
     if (env->beam_blocks_movement) beam_clear(env);
     fire_beams(env);
 
     // Logging
     if (env->tick_depletion == 0.0f && env->n_apple_alive == 0) env->tick_depletion = (float)env->tick;
+    for (int a = 0; a < env->num_agents; a++){
+        if (fabsf(env->agents[a].rewards[0]) > 1.0f) env->tot_clipped_rewards += 1.0f;
+    }
 
     if (env->tick >= HORIZON){
         add_log(env);
