@@ -20,7 +20,6 @@ typedef uint8_t obs_t;
 
 #define MAX_AGENTS 32
 #define HORIZON 1000 // SocialJax's num_inner_steps
-#define ZAPPED_REWARD -50.0f
 // ---------------------------------------------------------------- grid codes
 #define EMPTY       0
 #define WALL        1   
@@ -176,6 +175,7 @@ struct Env {
     float *smoothed_rewards;  // eq.4 eligibility trace e_i^t, (num_agents,)
 
     float zap_reward;
+    float zapped_reward;
 };
 
 // ================================================================== rng
@@ -221,6 +221,7 @@ void puf_init(Env* env, Dict* kwargs){
     env->inequity_aversion_alpha = dict_get(kwargs, "inequity_aversion_alpha");
     env->inequity_aversion_beta = dict_get(kwargs, "inequity_aversion_beta");
     env->zap_reward = dict_get(kwargs, "zap_reward");
+    env->zapped_reward = dict_get(kwargs, "zapped_reward");
     if (env->inequity_aversion && env->shared_rewards){
         printf("common_harvest: Can't have both inequity_aversion and shared_rewards True.\n");
         exit(1);
@@ -684,7 +685,7 @@ void fire_beams(Env* env){
             if (env->grid[cell_idx] >= AGENT_BASE){
                 const int32_t victim_id = env->grid[cell_idx] - AGENT_BASE;
                 env->hit[env->n_hit++] = victim_id;
-                env->agents[victim_id].rewards[0] += ZAPPED_REWARD;
+                env->agents[victim_id].rewards[0] += env->zapped_reward;
                 env->agents[a].rewards[0] += env->zap_reward;
                 env->sum_ticks_hit += (float)env->tick; // Logging
             } else if (env->grid[cell_idx] == EMPTY){
