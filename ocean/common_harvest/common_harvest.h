@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+
+// #define HARVEST_DEBUG  // Per-step prints, also set by debug_play.c
 typedef uint8_t obs_t;
 #include "pufferenv.h"
 #include "raylib.h"
@@ -629,6 +631,9 @@ void collect_apples(Env* env){
         if (env->grid[target_idx] != APPLE) continue;
         env->agents[a].rewards[0] += 1.0f;
         n_collected++;
+#ifdef HARVEST_DEBUG
+        printf("t=%4d  apple   agent %d\n", env->tick, a);
+#endif
         env->grid[target_idx] = EMPTY;
         // Logging
         env->sum_ticks_apple_collected += (float)env->tick;
@@ -669,6 +674,9 @@ void fire_beams(Env* env){
                 env->hit[env->n_hit++] = victim_id;
                 env->agents[victim_id].rewards[0] += env->zapped_reward;
                 env->agents[a].rewards[0] += env->zap_reward;
+#ifdef HARVEST_DEBUG
+                printf("t=%4d  hit     shooter %d -> victim %d\n", env->tick, a, victim_id);
+#endif
                 env->sum_ticks_hit += (float)env->tick; // Logging
             } else if (env->grid[cell_idx] == EMPTY){
                 env->grid[cell_idx] = BEAM;
@@ -679,7 +687,7 @@ void fire_beams(Env* env){
 };
 
 void svo_rewards(Env* env){
-    if (env->svo_theta == 0.0f) return;
+    if (env->svo_theta == 1.0f) return;
     
     float reward_sum = 0.0f;
     for (int b = 0; b < env->num_agents; b++){
@@ -693,6 +701,22 @@ void svo_rewards(Env* env){
         env->agents[a].rewards[0] = svo_reward;
     }
 };
+
+#ifdef HARVEST_DEBUG
+void debug_print_rewards(Env* env, const float* extrinsic){
+    float extrinsic_sum = 0.0f;
+    for (int a = 0; a < env->num_agents; a++) extrinsic_sum += extrinsic[a];
+    printf("t=%4d  svo_theta=%.3f\n", env->tick, env->svo_theta);
+    printf("  agent  extrinsic  others_mean      final  clip  apples\n");
+    for (int a = 0; a < env->num_agents; a++){
+        const float others_mean = (extrinsic_sum - extrinsic[a])/(float)(env->num_agents - 1);
+        const float final = env->agents[a].rewards[0];
+        printf("  %5d %10.4f %12.4f %10.4f %5s %7.0f\n",
+            a, extrinsic[a], others_mean, final,
+            fabsf(final) > 1.0f ? "yes" : "", env->agent_returns[a]);
+    }
+}
+#endif
 
 void puf_step(Env* env){
     env->tick += 1;
@@ -710,7 +734,14 @@ void puf_step(Env* env){
     move_agents(env);
     if (env->beam_blocks_movement) beam_clear(env);
     fire_beams(env);
+#ifdef HARVEST_DEBUG
+    float extrinsic[MAX_AGENTS];
+    for (int a = 0; a < env->num_agents; a++) extrinsic[a] = env->agents[a].rewards[0];
+#endif
     svo_rewards(env);
+#ifdef HARVEST_DEBUG
+    debug_print_rewards(env, extrinsic);
+#endif
     // Logging
     if (env->tick_depletion == 0.0f && env->n_apple_alive == 0) env->tick_depletion = (float)env->tick;
     for (int a = 0; a < env->num_agents; a++){
