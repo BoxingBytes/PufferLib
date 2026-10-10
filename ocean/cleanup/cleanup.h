@@ -33,7 +33,7 @@ typedef uint8_t obs_t;
 
 #define MAX_AGENTS 16
 #define HORIZON 1000 // SocialJax's num_inner_steps
-#define ZAP_REWARD 0.05f
+#define ZAP_REWARD -0.05f
 #define ZAPPED_REWARD -1.0f
 
 // ---------------------------------------------------------------- grid codes

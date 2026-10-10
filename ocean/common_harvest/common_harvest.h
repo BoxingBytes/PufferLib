@@ -643,6 +643,9 @@ void collect_apples(Env* env){
         if (env->grid[target_idx] != APPLE) continue;
         if (!env->shared_rewards) env->agents[a].rewards[0] += 1.0f;
         n_collected++;
+#ifdef HARVEST_DEBUG
+        printf("t=%4d  apple   agent %d\n", env->tick, a);
+#endif
         env->grid[target_idx] = EMPTY;
         // Logging
         env->sum_ticks_apple_collected += (float)env->tick;
@@ -687,6 +690,9 @@ void fire_beams(Env* env){
                 env->hit[env->n_hit++] = victim_id;
                 env->agents[victim_id].rewards[0] += env->zapped_reward;
                 env->agents[a].rewards[0] += env->zap_reward;
+#ifdef HARVEST_DEBUG
+                printf("t=%4d  hit     shooter %d -> victim %d\n", env->tick, a, victim_id);
+#endif
                 env->sum_ticks_hit += (float)env->tick; // Logging
             } else if (env->grid[cell_idx] == EMPTY){
                 env->grid[cell_idx] = BEAM;
@@ -727,6 +733,32 @@ void get_inequity_aversion_rewards(Env* env){
     }
 };
 
+#ifdef HARVEST_DEBUG
+// dis/adv recomputed from the stored traces, to check ia == -scale*(alpha*dis + beta*adv)
+void debug_print_rewards(Env* env, const float* extrinsic){
+    const float trace_scale = env->inequity_aversion_smoothed ? 1.0f - env->inequity_aversion_lambda : 1.0f;
+    const float penalty_scale = trace_scale/(float)(env->num_agents - 1);
+    printf("t=%4d  IA=%d smoothed=%d lambda=%.3f alpha=%.3f beta=%.3f penalty_scale=%.6f\n",
+        env->tick, env->inequity_aversion, env->inequity_aversion_smoothed,
+        env->inequity_aversion_lambda, env->inequity_aversion_alpha,
+        env->inequity_aversion_beta, penalty_scale);
+    printf("  agent  extrinsic      trace        dis        adv         ia      final  clip  apples\n");
+    for (int i = 0; i < env->num_agents; i++){
+        float dis = 0.0f;
+        float adv = 0.0f;
+        for (int j = 0; j < env->num_agents; j++){
+            if (j == i) continue;
+            dis += fmaxf(env->smoothed_rewards[j] - env->smoothed_rewards[i], 0.0f);
+            adv += fmaxf(env->smoothed_rewards[i] - env->smoothed_rewards[j], 0.0f);
+        }
+        const float final = env->agents[i].rewards[0];
+        printf("  %5d %10.4f %10.4f %10.4f %10.4f %10.5f %10.5f %5s %7.0f\n",
+            i, extrinsic[i], env->smoothed_rewards[i], dis, adv, final - extrinsic[i], final,
+            fabsf(final) > 1.0f ? "yes" : "", env->agent_returns[i]);
+    }
+}
+#endif
+
 void puf_step(Env* env){
     env->tick += 1;
     // PufferLib allocates all buffers contiguously, so we can do that
@@ -743,7 +775,14 @@ void puf_step(Env* env){
     move_agents(env);
     if (env->beam_blocks_movement) beam_clear(env);
     fire_beams(env);
+#ifdef HARVEST_DEBUG
+    float extrinsic[MAX_AGENTS];
+    for (int a = 0; a < env->num_agents; a++) extrinsic[a] = env->agents[a].rewards[0];
+#endif
     get_inequity_aversion_rewards(env);
+#ifdef HARVEST_DEBUG
+    debug_print_rewards(env, extrinsic);
+#endif
 
     // Logging
     if (env->tick_depletion == 0.0f && env->n_apple_alive == 0) env->tick_depletion = (float)env->tick;
