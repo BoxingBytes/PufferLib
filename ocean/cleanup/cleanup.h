@@ -33,8 +33,6 @@ typedef uint8_t obs_t;
 
 #define MAX_AGENTS 16
 #define HORIZON 1000 // SocialJax's num_inner_steps
-#define ZAP_REWARD -0.05f
-#define ZAPPED_REWARD -1.0f
 
 // ---------------------------------------------------------------- grid codes
 #define EMPTY       0
@@ -215,6 +213,9 @@ struct Env {
     float *agent_returns;            // For computing equality
 
     float *smoothed_rewards;  // eq.4 eligibility trace e_i^t, (num_agents,)
+
+    float zap_reward;
+    float zapped_reward;
 };
 
 // ================================================================== rng
@@ -255,6 +256,8 @@ void puf_init(Env* env, Dict* kwargs){
         printf("cleanup: Can't have both inequity_aversion and shared_rewards True.\n");
         exit(1);
     }
+    env->zap_reward = dict_get(kwargs, "zap_reward");
+    env->zapped_reward = dict_get(kwargs, "zapped_reward");
     env->rng += (uint32_t)dict_get(kwargs, "rng");  // my_vec_init preloads rng with the env index
 
     c_seed(env, env->rng);
@@ -738,8 +741,8 @@ void fire_beams(Env* env){
             if (env->grid[cell_idx] >= AGENT_BASE){
                 const int32_t victim_id = env->grid[cell_idx] - AGENT_BASE;
                 env->hit[env->n_hit++] = victim_id;
-                env->agents[victim_id].rewards[0] += ZAPPED_REWARD;
-                env->agents[a].rewards[0] += ZAP_REWARD;
+                env->agents[victim_id].rewards[0] += env->zapped_reward;
+                env->agents[a].rewards[0] += env->zap_reward;
                 env->sum_ticks_hit += (float)env->tick; // Logging
             } else if (env->grid[cell_idx] == EMPTY){
                 env->grid[cell_idx] = BEAM;
@@ -818,13 +821,13 @@ void puf_step(Env* env){
     compute_targets(env);
     resolve_conflicts(env);
     collect_apples(env);
+    move_agents(env);
+    fire_beams(env);
+    fire_clean_beams(env);
     get_inequity_aversion_rewards(env);
     for (int a = 0; a < env->num_agents; a++){
         if (fabsf(env->agents[a].rewards[0]) > 1.0f) env->tot_clipped_rewards += 1.0f;
     }
-    move_agents(env);
-    fire_beams(env);
-    fire_clean_beams(env);
 
     // Logging. dirt_fraction is this step's starting value, so a crossing is seen one step late
     env->sum_dirt_fraction += env->dirt_fraction;

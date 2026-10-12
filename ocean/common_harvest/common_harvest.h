@@ -391,16 +391,25 @@ void puf_reset(Env* env){
         env->grid[env->apple_idx[i]] = APPLE;
     }
 
-    // Agents 0/1 seat on 'Q' cells, the rest on 'P' cells
+    memset(env->agents_idx, 0, env->num_agents*sizeof(int32_t));
+    int32_t idx;
+    int32_t a;
+    // Random agents on 'Q' cells.
+    for (int i = 0; i < fmin(env->n_respawn_in,env->num_agents); i++){
+        idx = env->respawn_in_idx[i];
+        do {
+            a = rnd(env) % env->num_agents;
+        } while (env->agents_idx[a] != 0);
+        env->grid[idx] = AGENT_BASE + a;
+        env->agents_idx[a] = idx;
+        env->agents_dir[a] = rnd(env) % NUM_DIRS;
+    }
+    // Rest of the agents on 'P' cells.
     for (int i = 0; i < env->num_agents; i++){
-        int32_t idx;
-        if (i < env->n_respawn_in){
-            idx = env->respawn_in_idx[i];
-        } else {
-            do {
-                idx = env->respawn_idx[rnd(env) % env->n_respawn];
-            } while (env->grid[idx] != EMPTY);
-        }
+        if (env->agents_idx[i] != 0) continue; // Already seated on
+        do {
+            idx = env->respawn_idx[rnd(env) % env->n_respawn];
+        } while (env->grid[idx] != EMPTY);
         env->grid[idx] = AGENT_BASE + i;
         env->agents_idx[i] = idx;
         env->agents_dir[i] = rnd(env) % NUM_DIRS;
