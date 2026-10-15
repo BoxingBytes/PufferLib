@@ -23,6 +23,8 @@
 #include <string.h>
 #include <math.h>
 #include <assert.h>
+
+// #define CLEANUP_DEBUG  // Per-step prints, also set by debug_play.c
 typedef uint8_t obs_t;
 #include "pufferenv.h"
 #include "raylib.h"
@@ -33,8 +35,6 @@ typedef uint8_t obs_t;
 
 #define MAX_AGENTS 16
 #define HORIZON 1000 // SocialJax's num_inner_steps
-#define ZAP_REWARD 0.05f
-#define ZAPPED_REWARD -1.0f
 
 // ---------------------------------------------------------------- grid codes
 #define EMPTY       0
@@ -153,12 +153,7 @@ struct Env {
 
     // ------------------------------------------------------------ config
     bool differentiate_other_agents_in_obs;
-    bool shared_rewards;
-    bool inequity_aversion;
-    bool inequity_aversion_smoothed;
-    float inequity_aversion_lambda; // Trace decay, replaces Hughes' gamma*lambda
-    float inequity_aversion_alpha;  // disadvantageous (others > self) coefficient
-    float inequity_aversion_beta;   // advantageous (self > others) coefficient
+    float svo_theta;
 
     // ------------------------------------------------------------ agents
     int32_t *agents_idx;  // padded flat cell index
@@ -214,7 +209,8 @@ struct Env {
     float tot_clipped_rewards;       // Agent-steps with |reward| > 1, PufferLib clamps to [-1, 1]
     float *agent_returns;            // For computing equality
 
-    float *smoothed_rewards;  // eq.4 eligibility trace e_i^t, (num_agents,)
+    float zap_reward;
+    float zapped_reward;
 };
 
 // ================================================================== rng
@@ -245,14 +241,15 @@ void puf_init(Env* env, Dict* kwargs){
         exit(1);
     }
     env->differentiate_other_agents_in_obs = dict_get(kwargs, "differentiate_other_agents_in_obs");
-    env->shared_rewards = dict_get(kwargs, "shared_rewards");
-    env->inequity_aversion = dict_get(kwargs, "inequity_aversion");
-    env->inequity_aversion_smoothed = dict_get(kwargs, "inequity_aversion_smoothed");
-    env->inequity_aversion_lambda = dict_get(kwargs, "inequity_aversion_lambda");
-    env->inequity_aversion_alpha = dict_get(kwargs, "inequity_aversion_alpha");
-    env->inequity_aversion_beta = dict_get(kwargs, "inequity_aversion_beta");
-    if (env->inequity_aversion && env->shared_rewards){
-        printf("cleanup: Can't have both inequity_aversion and shared_rewards True.\n");
+    env->zap_reward = dict_get(kwargs, "zap_reward");
+    env->zapped_reward = dict_get(kwargs, "zapped_reward");
+    env->svo_theta = dict_get(kwargs, "svo_theta");
+    if (env->svo_theta < 0.0f || env->svo_theta > 1.0f){
+        printf("cleanup: svo_theta=%f out of range (0..1)\n", env->svo_theta);
+        exit(1);
+    }
+    if (env->svo_theta < 1.0f && env->num_agents < 2){
+        printf("cleanup: svo_theta < 1 needs num_agents >= 2\n");
         exit(1);
     }
     env->rng += (uint32_t)dict_get(kwargs, "rng");  // my_vec_init preloads rng with the env index
@@ -365,8 +362,6 @@ void puf_init(Env* env, Dict* kwargs){
 
     // Logging
     env->agent_returns = (float*)calloc(env->num_agents, sizeof(float));
-
-    env->smoothed_rewards = (float*)calloc(env->num_agents, sizeof(float));
 };
 
 void compute_observations(Env* env){
@@ -473,7 +468,6 @@ void puf_reset(Env* env){
     env->tick_growth = 0.0f;
     env->tot_clipped_rewards = 0.0f;
     memset(env->agent_returns, 0, env->num_agents*sizeof(float));
-    memset(env->smoothed_rewards, 0, env->num_agents*sizeof(float));
 
     compute_observations(env);
 };
@@ -694,8 +688,11 @@ void collect_apples(Env* env){
     for (int a = 0; a < env->num_agents; a++){
         const int32_t target_idx = env->target[a];
         if (env->grid[target_idx] != APPLE) continue;
-        if (!env->shared_rewards) env->agents[a].rewards[0] += 1.0f;
+        env->agents[a].rewards[0] += 1.0f;
         n_collected++;
+#ifdef CLEANUP_DEBUG
+        printf("t=%4d  apple   agent %d\n", env->tick, a);
+#endif
         env->grid[target_idx] = EMPTY;
         env->dead_apple_idx[env->n_dead++] = target_idx;
         // Logging
@@ -703,10 +700,6 @@ void collect_apples(Env* env){
         env->agent_returns[a] += 1.0f;
     }
     env->tot_apple_collected += (float)n_collected;
-    if (env->shared_rewards){
-        const float share = (float)n_collected/(float)env->num_agents;
-        for (int i = 0; i < env->num_agents; i++) env->agents[i].rewards[0] = share;
-    }
 };
 
 void move_agents(Env* env){
@@ -738,8 +731,11 @@ void fire_beams(Env* env){
             if (env->grid[cell_idx] >= AGENT_BASE){
                 const int32_t victim_id = env->grid[cell_idx] - AGENT_BASE;
                 env->hit[env->n_hit++] = victim_id;
-                env->agents[victim_id].rewards[0] += ZAPPED_REWARD;
-                env->agents[a].rewards[0] += ZAP_REWARD;
+                env->agents[victim_id].rewards[0] += env->zapped_reward;
+                env->agents[a].rewards[0] += env->zap_reward;
+#ifdef CLEANUP_DEBUG
+                printf("t=%4d  hit     shooter %d -> victim %d\n", env->tick, a, victim_id);
+#endif
                 env->sum_ticks_hit += (float)env->tick; // Logging
             } else if (env->grid[cell_idx] == EMPTY){
                 env->grid[cell_idx] = BEAM;
@@ -772,36 +768,38 @@ void fire_clean_beams(Env* env){
     }
 };
 
-// (Hughes et al. 2019)
-void get_inequity_aversion_rewards(Env* env){
-    if (!env->inequity_aversion) return;
+// theta*own + (1 - theta)*mean(others). theta = 1/num_agents is the fully shared reward
+void svo_rewards(Env* env){
+    if (env->svo_theta == 1.0f) return;
 
-    float e[MAX_AGENTS];
-    for (int a = 0; a < env->num_agents; a++){
-        if (env->inequity_aversion_smoothed){
-            env->smoothed_rewards[a] = env->inequity_aversion_lambda*env->smoothed_rewards[a]
-                + env->agents[a].rewards[0];
-            e[a] = env->smoothed_rewards[a];
-        } else {
-            e[a] = env->agents[a].rewards[0];
-        }
+    float reward_sum = 0.0f;
+    for (int b = 0; b < env->num_agents; b++){
+        reward_sum += env->agents[b].rewards[0];
     }
 
-    // Trace sums ~1/(1-lambda) steps, keeps alpha/beta in per-step reward units
-    const float trace_scale = env->inequity_aversion_smoothed ? 1.0f - env->inequity_aversion_lambda : 1.0f;
-    const float penalty_scale = trace_scale / (float)(env->num_agents - 1);
-    for (int i = 0; i < env->num_agents; i++){
-        float disadvantageous = 0.0f;
-        float advantageous = 0.0f;
-        for (int j = 0; j < env->num_agents; j++){
-            if (j == i) continue;
-            disadvantageous += fmaxf(e[j] - e[i], 0.0f);
-            advantageous += fmaxf(e[i] - e[j], 0.0f);
-        }
-        env->agents[i].rewards[0] -= penalty_scale*(env->inequity_aversion_alpha*disadvantageous
-            + env->inequity_aversion_beta*advantageous);
+    for (int a = 0; a < env->num_agents; a++){
+        float own_reward = env->agents[a].rewards[0];
+        float svo_reward = own_reward * (env->svo_theta) +
+            (1 - env->svo_theta) * (reward_sum-own_reward)/(float)(env->num_agents-1);
+        env->agents[a].rewards[0] = svo_reward;
     }
 };
+
+#ifdef CLEANUP_DEBUG
+void debug_print_rewards(Env* env, const float* extrinsic){
+    float extrinsic_sum = 0.0f;
+    for (int a = 0; a < env->num_agents; a++) extrinsic_sum += extrinsic[a];
+    printf("t=%4d  svo_theta=%.3f\n", env->tick, env->svo_theta);
+    printf("  agent  extrinsic  others_mean      final  clip  apples\n");
+    for (int a = 0; a < env->num_agents; a++){
+        const float others_mean = (extrinsic_sum - extrinsic[a])/(float)(env->num_agents - 1);
+        const float final = env->agents[a].rewards[0];
+        printf("  %5d %10.4f %12.4f %10.4f %5s %7.0f\n",
+            a, extrinsic[a], others_mean, final,
+            fabsf(final) > 1.0f ? "yes" : "", env->agent_returns[a]);
+    }
+}
+#endif
 
 void puf_step(Env* env){
     env->tick += 1;
@@ -818,13 +816,20 @@ void puf_step(Env* env){
     compute_targets(env);
     resolve_conflicts(env);
     collect_apples(env);
-    get_inequity_aversion_rewards(env);
-    for (int a = 0; a < env->num_agents; a++){
-        if (fabsf(env->agents[a].rewards[0]) > 1.0f) env->tot_clipped_rewards += 1.0f;
-    }
     move_agents(env);
     fire_beams(env);
     fire_clean_beams(env);
+#ifdef CLEANUP_DEBUG
+    float extrinsic[MAX_AGENTS];
+    for (int a = 0; a < env->num_agents; a++) extrinsic[a] = env->agents[a].rewards[0];
+#endif
+    svo_rewards(env);
+#ifdef CLEANUP_DEBUG
+    debug_print_rewards(env, extrinsic);
+#endif
+    for (int a = 0; a < env->num_agents; a++){
+        if (fabsf(env->agents[a].rewards[0]) > 1.0f) env->tot_clipped_rewards += 1.0f;
+    }
 
     // Logging. dirt_fraction is this step's starting value, so a crossing is seen one step late
     env->sum_dirt_fraction += env->dirt_fraction;
@@ -988,7 +993,6 @@ void puf_close(Env* env){
     free(env->hit);
     free(env->beam_idx);
     free(env->agent_returns);
-    free(env->smoothed_rewards);
     if (env->client != NULL){
         close_client(env->client);
     }

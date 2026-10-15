@@ -20,7 +20,7 @@ typedef uint8_t obs_t;
 #define NUM_ATNS 1
 #define ACT_SIZES {NUM_ACTIONS}
 
-#define MAX_AGENTS 32
+#define MAX_AGENTS 16
 #define HORIZON 1000 // SocialJax's num_inner_steps
 // ---------------------------------------------------------------- grid codes
 #define EMPTY       0
@@ -216,6 +216,10 @@ void puf_init(Env* env, Dict* kwargs){
         printf("common_harvest: svo_theta=%f out of range (0..1)\n", env->svo_theta);
         exit(1);
     }
+    if (env->svo_theta < 1.0f && env->num_agents < 2){
+        printf("common_harvest: svo_theta < 1 needs num_agents >= 2\n");
+        exit(1);
+    }
     env->rng += (uint32_t)dict_get(kwargs, "rng");  // my_vec_init preloads rng with the env index
 
     c_seed(env, env->rng);
@@ -356,7 +360,7 @@ void compute_observations(Env* env){
 };
 
 
-// Matches SocialJax: agents 0 and 1 seat on the 2 'Q' cells, the rest on 'P'
+// 2 random agents seat on the 'Q' cells (SocialJax always uses agents 0 and 1), the rest on 'P'
 void puf_reset(Env* env){
     env->tick = 0;
     memset(env->hit, 0, env->num_agents*BEAM_MASK_SIZE*sizeof(uint8_t));
@@ -380,16 +384,27 @@ void puf_reset(Env* env){
         env->grid[env->apple_idx[i]] = APPLE;
     }
 
-    // Agents 0/1 seat on 'Q' cells, the rest on 'P' cells
+    // agents_idx 0 marks "not seated yet": padded cell 0 is a WALL corner, never a seat
+    memset(env->agents_idx, 0, env->num_agents*sizeof(int32_t));
+    int32_t idx;
+    // Random agents on 'Q' cells
+    const int n_in = env->n_respawn_in < env->num_agents ? env->n_respawn_in : env->num_agents;
+    for (int i = 0; i < n_in; i++){
+        int32_t a;
+        do {
+            a = rnd(env) % env->num_agents;
+        } while (env->agents_idx[a] != 0);
+        idx = env->respawn_in_idx[i];
+        env->grid[idx] = AGENT_BASE + a;
+        env->agents_idx[a] = idx;
+        env->agents_dir[a] = rnd(env) % NUM_DIRS;
+    }
+    // Rest of the agents on 'P' cells
     for (int i = 0; i < env->num_agents; i++){
-        int32_t idx;
-        if (i < env->n_respawn_in){
-            idx = env->respawn_in_idx[i];
-        } else {
-            do {
-                idx = env->respawn_idx[rnd(env) % env->n_respawn];
-            } while (env->grid[idx] != EMPTY);
-        }
+        if (env->agents_idx[i] != 0) continue; // Already seated on 'Q'
+        do {
+            idx = env->respawn_idx[rnd(env) % env->n_respawn];
+        } while (env->grid[idx] != EMPTY);
         env->grid[idx] = AGENT_BASE + i;
         env->agents_idx[i] = idx;
         env->agents_dir[i] = rnd(env) % NUM_DIRS;
